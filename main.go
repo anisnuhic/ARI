@@ -1,63 +1,89 @@
 package main
 
 import (
-    "fmt"
-    "os"
-    "time"
-    "github.com/nvisibleinc/go-ari-library/client"
-    "github.com/nvisibleinc/go-ari-library/ari"
+	"context"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+	"github.com/CyCoreSystems/ari/v6"
+	"github.com/CyCoreSystems/ari/v6/client/native"
 )
-
-var ariClient *client.Client
-
+var ariClient *ari.Client
 func main() {
-    err := initARIClient()
-    if err != nil {
-        fmt.Println("Error initializing ARI client:", err)
-        return
-    }
+	client, err := native.Connect(&native.Options{
+		Application: "main",
+		Username:    "asterisk",
+		Password:    "pass",
+		URL:         "http://localhost:8088/ari",
+	})
+	if err != nil {
+		log.Fatalf("Error connecting to server ARI: %v", err)
+	}
 
-    // Example of handling commands
-    args := os.Args[1:]
-    handleDial(args)
+	fmt.Println("Connected to ARI server")
 }
-
-func initARIClient() error {
-    var err error
-    ariClient, err = client.New(&client.Options{
-        Application: "your-app-name",
-        Username:    "asterisk",
-        Password:    "asterisk",
-        URL:         "http://localhost:8088/ari",
-    })
-    return err
-}
-
-func handleDial(args []string) {
+func handleDial(args []string){
     if len(args) < 2 {
-        fmt.Println("Usage: dial <endpoint1> <endpoint2> [<endpoint3> ...]")
+        fmt.Println("Usage: dial <endpoint1> <endpoint2> <endpoint3> ...")
         return
     }
 
-    callID := fmt.Sprintf("call-%d", time.Now().UnixNano())
+    callId := fmt.Sprintf("call-%d", time.Now().UnixNano())
     endpoints := args
 
-    for _, endpoint := range endpoints {
-        err := originateCall(endpoint, callID)
+    for i :=0 ; i<len(endpoints); i++ {
+        source := endpoints[i]
+        destination := endpoints[i+i]
+        err := originateCall(source, destination, callId)
         if err != nil {
             fmt.Println("Error initiating call:", err)
             return
         }
     }
-    fmt.Println("Call initiated with ID:", callID)
+    fmt.Println("Call initiated with ID: ", callId)
 }
 
-func originateCall(endpoint, callID string) error {
-    // Example implementation of originateCall
-    _, err := ariClient.Channels.Originate(&ari.OriginateRequest{
-        Endpoint: endpoint,
-        App:      "your-app-name",
-        ChannelID: callID,
+func originateCall(source, destination, callId string) error {
+    _, err := ariClient.Channel().Create(context.Background(), &ari.ChannelCreateRequest{
+        Endpoint: source,
+        App: "main",
+        ChannelID : callId,
     })
-    return err
+    if err != nil {
+        return fmt.Errorf("Error creating channel for call %s: %v", source, err)
+        
+    }
+    _, err := ariClient.Channel().Originate(context.Background(), &ari.OriginateRequest{
+        Endpoint: destination,
+        App: "main",
+        ChannelID : callId,
+    }) 
+    if err != nil {
+        return fmt.Errorf("Error originating call to destination %s %v", destination,err)
+    }
+    return nil
+}
+func handleList(){
+    //implement this function
+}
+func handleJoin(args []string){
+    //implement this function
+}
+
+func chooseOption(input string){
+    parts := strings.Split(input, " ")
+    command := parts[0]
+    args :=parts[1:]
+
+    switch command {
+    case "dial":
+        handleDial(args);
+    case "list":
+        handleList();
+    case "join":
+        handleJoin(args);
+    default:
+        fmt.Println("Invalid command. Use 'dial', 'list', or 'join' followed by phone number.");
+    }
 }
