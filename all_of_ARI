@@ -1,0 +1,1520 @@
+***applications.go file***
+
+package ari
+
+import (
+	"fmt"
+	"net/url"
+)
+
+type ApplicationService struct {
+	client *Client
+}
+
+func (s *ApplicationService) List() ([]*Application, error) {
+	var out []*Application
+	return out, s.client.Get("/applications", nil, &out)
+}
+
+func (s *ApplicationService) Get(applicationName string) (*Application, error) {
+	var out Application
+
+	return &out, s.client.Get(fmt.Sprintf("/applications/%s", applicationName), nil, &out)
+}
+
+type Application struct {
+	BridgeIds   []string `json:"bridge_ids"`
+	ChannelIds  []string `json:"channel_ids"`
+	DeviceNames []string `json:"device_names"`
+	EndpointIds []string `json:"endpoint_ids"`
+	Name        string
+
+	// For further mutations
+	client *Client
+}
+
+func (a *Application) setClient(client *Client) {
+	a.client = client
+}
+
+func (a *Application) Subscribe(eventSource string) (*Application, error) {
+	var out Application
+	params := map[string]string{
+		"eventSource": eventSource,
+	}
+	return &out, a.client.Post(fmt.Sprintf("/applications/%s/subscription", a.Name), params, &out)
+}
+
+func (a *Application) Unsubscribe(eventSource string) (*Application, error) {
+	var out Application
+	return &out, a.client.Delete(fmt.Sprintf("/applications/%s/subscription?eventSource=%s", a.Name, url.QueryEscape(eventSource)), &out)
+}
+
+
+***ari.go file***
+
+package ari
+
+// Package ari implements the Asterisk ARI interface. See: https://wiki.asterisk.org/wiki/display/AST/Asterisk+12+ARI
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"net/url"
+	"reflect"
+	"strconv"
+	"time"
+
+	"github.com/jmcvetta/napping"
+
+	"golang.org/x/net/websocket"
+)
+
+type Client struct {
+	Debug         bool
+	ws            *websocket.Conn
+	hostname      string
+	username      string
+	password      string
+	port          int
+	appName       string
+	SubscribeAll  bool
+	reconnections int
+
+	session  napping.Session
+	endpoint string
+
+	// Services
+	Channels     ChannelService
+	Bridges      BridgeService
+	Applications ApplicationService
+	Asterisk     AsteriskService
+	DeviceStates DeviceStateService
+	Endpoints    EndpointService
+	Events       EventService
+	Mailboxes    MailboxService
+	Playbacks    PlaybackService
+	Recordings   RecordingService
+	Sounds       SoundService
+}
+
+func NewClient(username, password, hostname string, port int, appName string) *Client {
+	userinfo := url.UserPassword(username, password)
+	endpoint := "http://" + net.JoinHostPort(hostname, strconv.Itoa(port))
+
+	c := &Client{
+		hostname: hostname,
+		port:     port,
+		username: username,
+		password: password,
+		appName:  appName,
+		session: napping.Session{
+			Userinfo: userinfo,
+		},
+		endpoint: endpoint,
+	}
+	c.Channels.client = c
+	c.Bridges.client = c
+	c.Sounds.client = c
+	c.Playbacks.client = c
+	c.Asterisk.client = c
+	c.Mailboxes.client = c
+	c.Recordings.client = c
+	c.Events.client = c
+	c.Applications.client = c
+	c.DeviceStates.client = c
+	c.Endpoints.client = c
+
+	return c
+}
+
+func (c *Client) LaunchListener() <-chan Eventer {
+	ch := make(chan Eventer, 100)
+	go c.handleReceive(ch)
+	return ch
+}
+
+func (c *Client) handleReceive(ch chan<- Eventer) {
+	for {
+		c.reconnect(ch)
+		c.listenForMessages(ch)
+	}
+}
+
+func (c *Client) reconnect(ch chan<- Eventer) {
+	for {
+		err := c.connect()
+
+		if err == nil {
+			// Connected successfully
+			fmt.Println("Connected to websocket successfully, registered", c.appName)
+			ch <- &AriConnected{
+				Reconnections: c.reconnections,
+				Event:         Event{Message: Message{Type: "AriConnected"}},
+			}
+			c.reconnections++
+			return
+		}
+
+		fmt.Println("Error connecting, trying in 3 seconds:", err)
+		time.Sleep(3 * time.Second)
+		continue
+	}
+}
+
+func (c *Client) connect() error {
+	url := fmt.Sprintf("ws://%s:%d/ari/events?api_key=%s:%s&app=%s&subscribeAll=%t", c.hostname, c.port, c.username, c.password, c.appName, c.SubscribeAll)
+	ws, err := websocket.Dial(url, "", "http://localhost")
+	c.ws = ws
+	return err
+}
+
+func (c *Client) listenForMessages(ch chan<- Eventer) {
+	for {
+		var msg string
+		err := websocket.Message.Receive(c.ws, &msg)
+		if err != nil {
+			fmt.Println("Whoops, error reading from Socket, resetting connection")
+			ch <- &AriDisconnected{Event: Event{Message: Message{Type: "AriDisconnected"}}}
+			return
+		}
+
+		if err != nil {
+			fmt.Printf("Error decoding structured message: %#v\n", err)
+			continue
+		}
+
+		//fmt.Printf("  -> %s", msg)
+		recvMsg, err := parseMsg([]byte(msg))
+
+		if err != nil {
+			fmt.Printf("Error decoding incoming '%#v': %s\n", msg, err)
+			continue
+		}
+
+		c.setClientRecurse(recvMsg)
+
+		ch <- recvMsg
+	}
+}
+
+func (c *Client) Log(format string, v ...interface{}) {
+	if c.Debug {
+		log.Println(c.appName, fmt.Sprintf(format, v...))
+	}
+}
+
+func (c *Client) setClientRecurse(recvMsg interface{}) {
+	original := reflect.ValueOf(recvMsg)
+	doAssignClient(c, original, 0)
+}
+
+func doAssignClient(c *Client, original reflect.Value, depth int) {
+	// based off: https://gist.github.com/hvoecking/10772475
+	pkgPath := original.Type().PkgPath()
+
+	if pkgPath == "time" {
+		return
+	}
+
+	//fmt.Println("Ok, got something as a value, has PkgPath:", depth, original.Type().PkgPath(), original)
+
+	if original.CanInterface() {
+		setter, ok := original.Interface().(clientSetter)
+		if ok {
+			if !original.IsNil() {
+				setter.setClient(c)
+			}
+			return
+		}
+	}
+
+	switch original.Kind() {
+	case reflect.Ptr:
+		originalVal := original.Elem()
+		if !originalVal.IsValid() {
+			return
+		}
+		doAssignClient(c, originalVal, depth+1)
+	//case reflect.Interface:
+	//	originalVal := original.Interface()
+	//	doAssignClient(c, originalVal)
+	case reflect.Struct:
+		for i := 0; i < original.NumField(); i++ {
+			doAssignClient(c, original.Field(i), depth+1)
+		}
+
+	case reflect.Slice:
+		for i := 0; i < original.Len(); i++ {
+			doAssignClient(c, original.Index(i), depth+1)
+		}
+		//case reflect.Map:
+		// we don't have that case in our model
+		//default:
+	}
+}
+
+type clientSetter interface {
+	setClient(*Client)
+}
+
+
+***ari_test.go file***
+
+package ari
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSetClientRecurse(t *testing.T) {
+	assert := assert.New(t)
+	client := &Client{}
+
+	// test nested struct
+	msg := ChannelEnteredBridge{
+		Bridge:  &Bridge{},
+		Channel: &Channel{},
+	}
+
+	assert.Nil(msg.Bridge.client)
+	assert.Nil(msg.Channel.client)
+
+	client.setClientRecurse(&msg)
+	assert.Equal(client, msg.Bridge.client)
+	assert.Equal(client, msg.Channel.client)
+
+	// test slice
+	slice := []*Channel{&Channel{}}
+	client.setClientRecurse(&slice)
+	assert.Equal(client, slice[0].client)
+}
+
+***asterisk.go file***
+
+package ari
+
+import "github.com/jmcvetta/napping"
+
+//
+// Asterisk endpoints wrappers
+//
+
+type AsteriskService struct {
+	client *Client
+}
+
+func (s *AsteriskService) GetInfo() (*AsteriskInfo, error) {
+	ai := AsteriskInfo{}
+	return &ai, s.client.Get("/asterisk/info", nil, &ai)
+}
+
+func (s *AsteriskService) GetGlobalVar(variable string) (string, error) {
+	var out Variable
+	params := napping.Params{"variable": variable}.AsUrlValues()
+	err := s.client.Get("/asterisk/variable", &params, &out)
+	return out.Value, err
+}
+
+func (s *AsteriskService) SetGlobalVar(variable, value string) error {
+	payload := map[string]string{
+		"variable": variable,
+		"value":    value,
+	}
+	return s.client.Post("/asterisk/variable", payload, nil)
+}
+
+***bridges.go file***
+
+package ari
+
+import "fmt"
+
+type BridgeService struct {
+	client *Client
+}
+
+func (s *BridgeService) List() ([]*Bridge, error) {
+	var out []*Bridge
+	return out, s.client.Get("/bridges", nil, &out)
+}
+
+func (s *BridgeService) Create(params CreateBridgeParams) (*Bridge, error) {
+	var out Bridge
+	return &out, s.client.Post("/bridges", params, &out)
+}
+
+type CreateBridgeParams struct {
+	Type     string `json:"type,omitempty"`
+	BridgeID string `json:"bridgeId,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+func (s *BridgeService) Get(bridgeID string) (*Bridge, error) {
+	var out Bridge
+	return &out, s.client.Get(fmt.Sprintf("/bridges/%s", bridgeID), nil, &out)
+}
+
+func (s *BridgeService) Destroy(bridgeID string) error {
+	return s.client.Delete(fmt.Sprintf("/bridges/%s", bridgeID), nil)
+}
+
+type Bridge struct {
+	ID          string
+	Name        string
+	Technology  string
+	Creator     string
+	Channels    []string
+	BridgeType  string `json:"bridge_type"`
+	BridgeClass string `json:"bridge_class"`
+
+	// For further manipulations
+	client *Client
+}
+
+func (b *Bridge) setClient(client *Client) {
+	b.client = client
+}
+
+func (b *Bridge) Destroy() error {
+	return b.client.Delete(fmt.Sprintf("/bridges/%s", b.ID), nil)
+}
+
+// AddChannel adds a channel to a bridge. `role` can be `participant` or `announcer`
+func (b *Bridge) AddChannel(channel string, role RoleType) error {
+	params := map[string]string{
+		"channel": channel,
+		"role":    string(role),
+	}
+	return b.client.Post(fmt.Sprintf("/bridges/%s/addChannel", b.ID), params, nil)
+}
+
+type RoleType string
+
+const (
+	Participant RoleType = "participant"
+	Announcer   RoleType = "announcer"
+)
+
+func (b *Bridge) RemoveChannel(channel string) error {
+	params := map[string]string{
+		"channel": channel,
+	}
+	return b.client.Post(fmt.Sprintf("/bridges/%s/removeChannel", b.ID), params, nil)
+}
+
+// StartMOH starts Music on hold. If mohClass is "", it will not be sent as a param on the request.
+func (b *Bridge) StartMOH(mohClass string) error {
+	var payload interface{}
+	if mohClass != "" {
+		payload = map[string]string{"mohClass": mohClass}
+	}
+	return b.client.Post(fmt.Sprintf("/bridges/%s/moh", b.ID), payload, nil)
+
+}
+
+func (b *Bridge) StopMOH() error {
+	return b.client.Delete(fmt.Sprintf("/bridges/%s/moh", b.ID), nil)
+}
+
+func (b *Bridge) Play(params PlayParams) (*Playback, error) {
+	var out Playback
+	return &out, b.client.Post(fmt.Sprintf("/bridges/%s/play", b.ID), &params, &out)
+}
+
+func (b *Bridge) Record(params RecordParams) (*LiveRecording, error) {
+	var out LiveRecording
+
+	return &out, b.client.Post(fmt.Sprintf("/bridges/%s/record", b.ID), &params, &out)
+}
+
+
+***channels.go file***
+
+package ari
+
+import (
+	"fmt"
+
+	"github.com/jmcvetta/napping"
+)
+
+//
+// Channels, see https://wiki.asterisk.org/wiki/display/AST/Asterisk+12+Channels+REST+API
+//
+
+type ChannelService struct {
+	client *Client
+}
+
+func (s *ChannelService) List() ([]*Channel, error) {
+	var out []*Channel
+	return out, s.client.Get("/channels", nil, &out)
+}
+
+func (s *ChannelService) Create(params OriginateParams) (*Channel, error) {
+	var out Channel
+	return &out, s.client.Post("/channels", params, &out)
+}
+
+func (s *ChannelService) Get(channelID string) (*Channel, error) {
+	var out Channel
+	return &out, s.client.Get(fmt.Sprintf("/channels/%s", channelID), nil, &out)
+}
+
+func (s *ChannelService) Hangup(channelID string) error {
+	return s.client.Delete(fmt.Sprintf("/channels/%s", channelID), nil)
+}
+
+type OriginateParams struct {
+	Endpoint       string            `json:"endpoint"`
+	Extension      string            `json:"extension,omitempty"`
+	Context        string            `json:"context,omitempty"`
+	Priority       int64             `json:"priority,omitempty"`
+	App            string            `json:"app,omitempty"`
+	AppArgs        string            `json:"appArgs,omitempty"`
+	CallerID       string            `json:"callerId,omitempty"`
+	Timeout        int64             `json:"timeout,omitempty"`
+	ChannelID      string            `json:"channelId,omitempty"`
+	OtherChannelID string            `json:"otherChannelId,omitempty"`
+	Variables      map[string]string `json:"variables,omitempty"`
+}
+
+//
+// Model
+//
+
+type Channel struct {
+	ID           string
+	AccountCode  string
+	Caller       *CallerID
+	Connected    *CallerID
+	CreationTime *Time
+	Dialplan     *DialplanCEP
+	Name         string
+	State        string
+
+	// For further manipulations
+	client *Client
+}
+
+func (c *Channel) setClient(client *Client) {
+	c.client = client
+}
+
+func (c *Channel) String() string {
+	s := fmt.Sprintf("id=%s", c.ID)
+	if c.Caller != nil {
+		s = fmt.Sprintf("%s,caller=%s", s, c.Caller)
+	}
+	if c.Connected != nil {
+		s = fmt.Sprintf("%s,with=%s", s, c.Connected)
+	}
+
+	s = fmt.Sprintf("%s,state=%s", s, c.State)
+	return s
+}
+
+func (c *Channel) Hangup() error {
+	return c.client.Delete(fmt.Sprintf("/channels/%s", c.ID), nil)
+}
+
+func (c *Channel) ContinueInDialplan(context, exten string, priority int, label string) error {
+	return c.client.Post(fmt.Sprintf("/channels/%s/continue", c.ID), Dialplan{context, exten, priority, label}, nil)
+}
+
+func (c *Channel) Answer() error {
+	return c.client.Post(fmt.Sprintf("/channels/%s/answer", c.ID), nil, nil)
+}
+
+func (c *Channel) Ring() error {
+	return c.client.Post(fmt.Sprintf("/channels/%s/ring", c.ID), nil, nil)
+}
+
+func (c *Channel) RingStop() error {
+	return c.client.Delete(fmt.Sprintf("/channels/%s/ring", c.ID), nil)
+}
+
+// SendDTMF sends DTMF signals to the channel. It accepts either a string or a ChannelDTMFSend object.
+func (c *Channel) SendDTMF(dtmf interface{}) error {
+	var dtmfSend DTMFParams
+	switch o := dtmf.(type) {
+	case string:
+		dtmfSend = DTMFParams{DTMF: o}
+	case DTMFParams:
+		dtmfSend = o
+	default:
+		panic("Invalid type for `dtmf` param in ChannelsDTMFPostById")
+	}
+
+	return c.client.Post(fmt.Sprintf("/channels/%s/dtmf", c.ID), dtmfSend, nil)
+}
+
+type DTMFParams struct {
+	DTMF     string `json:"dtmf"`
+	Before   int64  `json:"before,omitempty"`
+	Between  int64  `json:"between,omitempty"`
+	Duration int64  `json:"duration,omitempty"`
+	After    int64  `json:"after,omitempty"`
+}
+
+// ChannelsMutePostById mutes a channel. Use `direction="both"` for default behavior.
+func (c *Channel) Mute(direction string) error {
+	return c.client.Post(fmt.Sprintf("/channels/%s/mute", c.ID), map[string]string{"direction": direction}, nil)
+}
+
+// ChannelsMuteDeleteById unmutes a channel. Use `direction="both"` for default behavior.
+func (c *Channel) Unmute(direction string) error {
+	return c.client.Delete(fmt.Sprintf("/channels/%s/mute?direction=%s", c.ID, direction), nil)
+}
+
+func (c *Channel) Hold() error {
+	return c.client.Post(fmt.Sprintf("/channels/%s/hold", c.ID), nil, nil)
+}
+
+func (c *Channel) StopHold() error {
+	return c.client.Delete(fmt.Sprintf("/channels/%s/hold", c.ID), nil)
+}
+
+// StartMOH starts Music on hold. If mohClass is "", it will not be sent as a param on the request.
+func (c *Channel) StartMOH(mohClass string) error {
+	var payload interface{}
+	if mohClass != "" {
+		payload = map[string]string{"mohClass": mohClass}
+	}
+	return c.client.Post(fmt.Sprintf("/channels/%s/moh", c.ID), payload, nil)
+
+}
+
+func (c *Channel) StopMOH() error {
+	return c.client.Delete(fmt.Sprintf("/channels/%s/moh", c.ID), nil)
+}
+
+func (c *Channel) StartSilence() error {
+	return c.client.Post(fmt.Sprintf("/channels/%s/silence", c.ID), nil, nil)
+}
+
+func (c *Channel) StopSilence() error {
+	return c.client.Delete(fmt.Sprintf("/channels/%s/silence", c.ID), nil)
+}
+
+// Play plays media through channel. See: https://wiki.asterisk.org/wiki/display/AST/ARI+and+Channels%3A+Simple+Media+Manipulation
+func (c *Channel) Play(params PlayParams) (*Playback, error) {
+	var out Playback
+	return &out, c.client.Post(fmt.Sprintf("/channels/%s/play", c.ID), &params, &out)
+}
+
+type PlayParams struct {
+	Media      string `json:"media"`
+	Lang       string `json:"lang,omitempty"`
+	OffsetMS   int64  `json:"offsetms,omitempty"`
+	SkipMS     int64  `json:"skipms,omitempty"`
+	PlaybackID string `json:"playbackId,omitempty"`
+}
+
+func (c *Channel) Record(params RecordParams) (*LiveRecording, error) {
+	var out LiveRecording
+	return &out, c.client.Post(fmt.Sprintf("/channels/%s/record", c.ID), &params, &out)
+}
+
+type RecordParams struct {
+	Name               string `json:"name"`
+	Format             string `json:"format,omitempty"`
+	MaxDurationSeconds int64  `json:"maxDurationSeconds"`
+	MaxSilenceSeconds  int64  `json:"maxSilenceSeconds"`
+	IfExists           string `json:"ifExists,omitempty"`
+	Beep               bool   `json:"beep"`
+	TerminateOn        string `json:"terminateOn,omitempty"`
+}
+
+func (c *Channel) GetVar(variable string) (string, error) {
+	var out Variable
+	params := napping.Params{"variable": variable}.AsUrlValues()
+	err := c.client.Get(fmt.Sprintf("/channels/%s/variable", c.ID), &params, &out)
+	return out.Value, err
+}
+
+func (c *Channel) SetVar(variable, value string) error {
+	payload := map[string]string{"variable": variable, "value": value}
+
+	return c.client.Post(fmt.Sprintf("/channels/%s/variable", c.ID), payload, nil)
+}
+
+func (c *Channel) Snoop(params SnoopParams) (*Channel, error) {
+	var out Channel
+	return &out, c.client.Post(fmt.Sprintf("/channels/%s/snoop", c.ID), params, &out)
+
+}
+
+type SnoopParams struct {
+	App     string `json:"app"`
+	AppArgs string `json:"appArgs,omitempty"`
+	Spy     string `json:"spy,omitempty"`
+	Whisper string `json:"whisper,omitempty"`
+	SnoopID string `json:"snoopId,omitempty"`
+}
+
+
+*** channels_test.go file***
+
+package ari
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestChannelString(t *testing.T) {
+	assert := assert.New(t)
+
+	var tests = []struct {
+		expected string
+		channel  Channel
+	}{
+		{"id=12345.12,state=Down",
+			Channel{ID: "12345.12", State: "Down"}},
+		{"id=12345.12,caller=Bob <911>,state=Up",
+			Channel{ID: "12345.12", State: "Up", Caller: &CallerID{Name: "Bob", Number: "911"}}},
+		{"id=12345.12,caller=Bob <911>,with=Alice <166>,state=Down",
+			Channel{ID: "12345.12", State: "Down", Caller: &CallerID{Name: "Bob", Number: "911"}, Connected: &CallerID{Name: "Alice", Number: "166"}},
+		},
+	}
+
+	for _, test := range tests {
+		assert.Equal(test.expected, test.channel.String())
+	}
+}
+
+***device_states.go file***
+
+package ari
+
+type DeviceStateService struct {
+	client *Client
+}
+
+***endpoints.go file***
+
+package ari
+
+type EndpointService struct {
+	client *Client
+}
+
+func (s *EndpointService) List() ([]*Endpoint, error) {
+	var out []*Endpoint
+	return out, s.client.Get("/endpoints", nil, &out)
+}
+
+
+***events.go file***
+
+package ari
+
+type EventService struct {
+	client *Client
+}
+
+type Message struct {
+	Type string
+}
+
+type Event struct {
+	Message
+	Application string
+	Timestamp   *Time `json:"timestamp"`
+}
+
+func (e Event) GetApplication() string {
+	return e.Application
+}
+
+func (e Event) GetType() string {
+	return e.Type
+}
+
+type Eventer interface {
+	GetApplication() string
+	GetType() string
+}
+
+
+***mailboxes.go file***
+
+package ari
+
+type MailboxService struct {
+	client *Client
+}
+
+
+***messages.go file***
+
+package ari
+
+import "encoding/json"
+
+// Package models implements the Asterisk ARI Messages structures.  See https://wiki.asterisk.org/wiki/display/AST/Asterisk+12+REST+Data+Models
+
+type StasisStart struct {
+	Event
+	Args           []string
+	Channel        *Channel
+	ReplaceChannel *Channel `json:"replace_channel"`
+}
+
+type StasisEnd struct {
+	Event
+	Channel *Channel
+}
+
+type ChannelVarset struct {
+	Event
+	Channel  *Channel // optionnal
+	Value    string
+	Variable string
+}
+
+type BridgeCreated struct {
+	Event
+	Bridge *Bridge
+}
+
+type BridgeDestroyed struct {
+	Event
+	Bridge *Bridge
+}
+
+type BridgeMerged struct {
+	Event
+	Bridge     *Bridge
+	BridgeFrom *Bridge `json:"bridge_from"`
+}
+
+type BridgeBlindTransfer struct {
+	Event
+	Bridge         *Bridge
+	Channel        *Channel
+	Context        string
+	Exten          string
+	IsExternal     bool     `json:"is_external"`
+	ReplaceChannel *Channel `json:"replace_channel"`
+	Result         string
+	Transferee     *Channel
+}
+
+type BridgeAttendedTransfer struct {
+	Event
+	DestinationApplication     string   `json:"destination_application"`
+	DestinationBridge          string   `json:"destination_bridge"`
+	DestinationLinkFirstLeg    *Channel `json:"destination_link_first_leg"`
+	DestinationLinkSecondLeg   *Channel `json:"destination_link_second_leg"`
+	DestinationThreeWayBridge  *Bridge  `json:"destination_three_way_bridge"`
+	DestinationThreeWayChannel *Channel `json:"destination_three_way_channel"`
+	DestinationType            string   `json:"destination_type"`
+	IsExternal                 bool     `json:"is_external"`
+	ReplaceChannel             *Channel `json:"replace_channel"`
+	Result                     string
+	TransferTarget             *Channel `json:"transfer_target"`
+	Transferee                 *Channel
+	TransfererFirstLeg         *Channel `json:"transferer_first_leg"`
+	TransfererFirstLegBridge   *Bridge  `json:"transferer_first_leg_bridge"`
+	TransfererSecondLeg        *Channel `json:"transferer_second_leg"`
+	TransfererSecondLegBridge  *Bridge  `json:"transferer_second_leg_bridge"`
+}
+
+type ChannelHangupRequest struct {
+	Event
+	Cause   int
+	Channel *Channel
+	Soft    bool
+}
+
+type ChannelDtmfReceived struct {
+	Event
+	Channel    *Channel
+	Digit      string
+	DurationMs int `json:"duration_ms"`
+}
+
+type ChannelTalkingStarted struct {
+	Event
+	Channel *Channel
+}
+
+type ChannelTalkingFinished struct {
+	Event
+	Channel  *Channel
+	Duration int64
+}
+
+type ChannelStateChange struct {
+	Event
+	Channel *Channel
+}
+
+type ChannelEnteredBridge struct {
+	Event
+	Bridge  *Bridge
+	Channel *Channel
+}
+
+type ChannelLeftBridge struct {
+	Event
+	Bridge  *Bridge
+	Channel *Channel
+}
+
+type ChannelDialplan struct {
+	Event
+	Channel         *Channel
+	DialplanApp     string `json:"dialplan_app"`
+	DialplanAppData string `json:"dialplan_app_data"`
+}
+
+type ChannelCallerID struct {
+	Event
+	CallerPresentation    int64  `json:"caller_presentation"`
+	CallerPresentationTxt string `json:"caller_presentation_txt"`
+	Channel               *Channel
+}
+
+type ChannelCreated struct {
+	Event
+	Channel *Channel
+}
+
+type ChannelConnectedLine struct {
+	Event
+	Channel *Channel
+}
+
+type ChannelDestroyed struct {
+	Event
+	Channel  *Channel
+	Cause    int64
+	CauseTxt string `json:"cause_txt"`
+}
+
+type PlaybackStarted struct {
+	Event
+	Playback *Playback
+}
+
+type PlaybackFinished struct {
+	Event
+	Playback *Playback
+}
+
+type DeviceStateChanged struct {
+	Event
+	DeviceState *DeviceState `json:"device_state"`
+}
+
+type PeerStatusChange struct {
+	Event
+	Endpoint *Endpoint `json:"endpoint"`
+	Peer     *Peer     `json:"peer"`
+}
+
+//
+// AsteriskInfo-related
+//
+
+// AriConnected is an Go library specific message, indicating a successful WebSocket connection.
+type AriConnected struct {
+	Event
+	Reconnections int
+}
+
+// AriDisonnected is an Go library specific message, indicating an error or a disconnection of the WebSocket connection.
+type AriDisconnected struct {
+	Event
+}
+
+func parseMsg(raw []byte) (Eventer, error) {
+	var event Event
+	err := json.Unmarshal(raw, &event)
+	if err != nil {
+		return nil, err
+	}
+
+	var msg Eventer
+	switch event.Type {
+	case "ChannelVarset":
+		msg = &ChannelVarset{}
+	case "ChannelDtmfReceived":
+		msg = &ChannelDtmfReceived{}
+	case "ChannelHangupRequest":
+		msg = &ChannelHangupRequest{}
+	case "ChannelConnectedLine":
+		msg = &ChannelConnectedLine{}
+	case "StasisStart":
+		msg = &StasisStart{}
+	case "PlaybackStarted":
+		msg = &PlaybackStarted{}
+	case "PlaybackFinished":
+		msg = &PlaybackFinished{}
+	case "ChannelTalkingStarted":
+		msg = &ChannelTalkingStarted{}
+	case "ChannelTalkingFinished":
+		msg = &ChannelTalkingFinished{}
+	case "ChannelDialplan":
+		msg = &ChannelDialplan{}
+	case "ChannelCallerId":
+		msg = &ChannelCallerID{}
+	case "ChannelStateChange":
+		msg = &ChannelStateChange{}
+	case "ChannelEnteredBridge":
+		msg = &ChannelEnteredBridge{}
+	case "ChannelLeftBridge":
+		msg = &ChannelLeftBridge{}
+	case "ChannelCreated":
+		msg = &ChannelCreated{}
+	case "ChannelDestroyed":
+		msg = &ChannelDestroyed{}
+	case "BridgeCreated":
+		msg = &BridgeCreated{}
+	case "BridgeDestroyed":
+		msg = &BridgeDestroyed{}
+	case "BridgeMerged":
+		msg = &BridgeMerged{}
+	case "BridgeBlindTransfer":
+		msg = &BridgeBlindTransfer{}
+	case "BridgeAttendedTransfer":
+		msg = &BridgeAttendedTransfer{}
+	case "DeviceStateChanged":
+		msg = &DeviceStateChanged{}
+	case "StasisEnd":
+		msg = &StasisEnd{}
+	case "PeerStatusChange":
+		msg = &PeerStatusChange{}
+	default:
+		return &event, nil
+	}
+
+	return msg, json.Unmarshal(raw, msg)
+}
+
+
+***messages_test.go file***
+
+package ari
+
+import (
+	"encoding/json"
+	"io/ioutil"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestParseMsg(t *testing.T) {
+	assert := assert.New(t)
+	bytes := readFile("ChannelConnectedLine.json")
+
+	msg, err := parseMsg(bytes)
+	assert.Nil(err)
+	assert.IsType(&ChannelConnectedLine{}, msg)
+
+	line := msg.(*ChannelConnectedLine)
+	assert.Equal("demo", line.Application)
+}
+
+func TestParseMsgUnknown(t *testing.T) {
+	assert := assert.New(t)
+	bytes := readFile("Unknown.json")
+
+	msg, err := parseMsg(bytes)
+	assert.Nil(err)
+	assert.IsType(&Event{}, msg)
+	assert.Equal("Unknown", msg.GetType())
+}
+
+func TestChannelConnectedLine(t *testing.T) {
+
+	actual := ChannelConnectedLine{}
+	parseJSON("ChannelConnectedLine.json", &actual)
+
+	expected := ChannelConnectedLine{
+		Event: Event{
+			Message: Message{
+				Type: "ChannelConnectedLine",
+			},
+			Application: "demo",
+			Timestamp:   parseTime("2017-08-26T15:20:12.596+0200"),
+		},
+		Channel: &Channel{
+			ID:           "1503753612.1674",
+			AccountCode:  "12",
+			CreationTime: parseTime("2017-08-26T15:20:12.595+0200"),
+			Name:         "Local/2103@spaeter-00000072;1",
+			State:        "Down",
+			Connected:    &CallerID{Name: "Bob", Number: "012345678"},
+			Caller:       &CallerID{Name: "Alice", Number: "123456e0"},
+			Dialplan:     &DialplanCEP{Context: "spaeter", Exten: "123456e0", Priority: 1},
+		},
+	}
+
+	assert.EqualValues(t, expected, actual)
+}
+
+func parseTime(str string) *Time {
+	timestamp, err := time.Parse(timeFormat, str)
+	if err != nil {
+		panic(err)
+	}
+	ts := Time(timestamp)
+	return &ts
+}
+
+func readFile(filename string) []byte {
+	bytes, err := ioutil.ReadFile("testdata/" + filename)
+	if err != nil {
+		panic(err)
+	}
+	return bytes
+}
+
+func parseJSON(filename string, v interface{}) {
+	file, err := os.Open("testdata/" + filename)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+
+	jsonParser := json.NewDecoder(file)
+	err = jsonParser.Decode(&v)
+	if err != nil {
+		panic(err)
+	}
+}
+
+
+***models.go file***
+
+package ari
+
+import "fmt"
+
+type Variable struct {
+	Value string
+}
+
+type CallerID struct {
+	Name   string
+	Number string
+}
+
+func (c *CallerID) String() string {
+	return fmt.Sprintf("%s <%s>", c.Name, c.Number)
+}
+
+type Sound struct {
+	Formats []FormatLangPair
+	ID      string
+	Text    string
+}
+
+type DialplanCEP struct {
+	Context  string
+	Exten    string
+	Priority int
+}
+
+type Dialplan struct {
+	Context  string `json:"context"`
+	Exten    string `json:"extension"`
+	Priority int    `json:"priority"`
+	Label    string `json:"label"`
+}
+
+type FormatLangPair struct {
+	Format   string
+	Language string
+}
+
+type AsteriskInfo struct {
+	Build  *BuildInfo
+	Config *ConfigInfo
+	Status *StatusInfo
+	System *SystemInfo
+}
+
+type BuildInfo struct {
+	Date    string
+	Kernel  string
+	Machine string
+	Options string
+	Os      string
+	User    string
+}
+
+type ConfigInfo struct {
+	DefaultLanguage string  `json:"default_language"`
+	MaxChannels     int64   `json:"max_channels"`
+	MaxLoad         float64 `json:"max_load"`
+	MaxOpenFiles    int64   `json:"max_open_files"`
+	Name            string
+	SetID           SetID
+}
+
+type SetID struct {
+	Group string
+	User  string
+}
+
+type StatusInfo struct {
+	LastReloadTime *Time `json:"last_reload_time"`
+	StartupTime    *Time `json:"startup_time"`
+}
+
+type SystemInfo struct {
+	EntityID string `json:"entity_id"`
+	Version  string
+}
+
+type DeviceState struct {
+	State string
+	Name  string
+}
+
+type Endpoint struct {
+	Technology string `json:"technology"`
+	Resource   string `json:"resource"`
+	State      string `json:"state"`
+}
+
+type Peer struct {
+	PeerStatus string `json:"peer_status"`
+}
+
+
+***playbacks.go file***
+
+package ari
+
+import (
+	"fmt"
+)
+
+//
+// Service
+//
+
+type PlaybackService struct {
+	client *Client
+}
+
+func (s *PlaybackService) Get(playbackID string) (*Playback, error) {
+	var out Playback
+	return &out, s.client.Get(fmt.Sprintf("/playbacks/%s", playbackID), nil, &out)
+}
+
+//
+// Model
+//
+
+type Playback struct {
+	ID        string
+	Language  string
+	MediaURI  string `json:"media_uri"`
+	State     string
+	TargetURI string `json:"target_uri"`
+
+	// For further manipulations
+	client *Client
+}
+
+func (p *Playback) setClient(client *Client) {
+	p.client = client
+}
+
+func (p *Playback) Stop() error {
+	return p.client.Delete(fmt.Sprintf("/playbacks/%s", p.ID), nil)
+}
+
+func (p *Playback) Control(operation string) (status int, err error) {
+	query := map[string]string{"operation": operation}
+	res, err := p.client.PostWithResponse(fmt.Sprintf("/playbacks/%s/control", p.ID), query, nil)
+	if err != nil {
+		if res == nil {
+			return 0, err
+		}
+		return res.Status(), err
+	}
+	return res.Status(), err
+}
+
+
+***recordings.go file***
+
+package ari
+
+import "fmt"
+
+//
+// Service
+//
+
+type RecordingService struct {
+	client *Client
+}
+
+func (s *RecordingService) ListStored() ([]*StoredRecording, error) {
+	var out []*StoredRecording
+	return out, s.client.Get("/recordings/stored", nil, &out)
+}
+
+func (s *RecordingService) GetStored(recordingName string) (*StoredRecording, error) {
+	var out StoredRecording
+	return &out, s.client.Get(fmt.Sprintf("/recordings/stored/%s", recordingName), nil, &out)
+}
+
+func (s *RecordingService) GetLive(recordingName string) (*LiveRecording, error) {
+	var out LiveRecording
+	return &out, s.client.Get(fmt.Sprintf("/recordings/live/%s", recordingName), nil, &out)
+}
+
+func (s *RecordingService) DeleteStored(recordingName string) error {
+	return s.client.Delete(fmt.Sprintf("/recordings/stored/%s", recordingName), nil)
+}
+
+func (s *RecordingService) CopyStored(recordingName, destinationRecordingName string) (*StoredRecording, error) {
+	var out StoredRecording
+	params := map[string]string{
+		"destinationRecordingName": destinationRecordingName,
+	}
+
+	return &out, s.client.Post(fmt.Sprintf("/recordings/stored/%s/copy", recordingName), params, &out)
+}
+
+//
+// Models
+//
+
+type StoredRecording struct {
+	Format string
+	Name   string
+
+	// For further manipulations
+	client *Client
+}
+
+func (s *StoredRecording) setClient(client *Client) {
+	s.client = client
+}
+
+func (s *StoredRecording) Delete() error {
+	return s.client.Recordings.DeleteStored(s.Name)
+}
+
+func (s *StoredRecording) Copy(destinationRecordingName string) (*StoredRecording, error) {
+	return s.client.Recordings.CopyStored(s.Name, destinationRecordingName)
+}
+
+type LiveRecording struct {
+	Cause           string
+	Duration        *int64
+	Format          string
+	Name            string
+	SilenceDuration *int64 `json:"silence_duration"`
+	State           string
+	TalkingDuration *int64 `json:"talking_duration"`
+	TargetURI       string `json:"target_uri"`
+
+	// For further manipulations
+	client *Client
+}
+
+func (l *LiveRecording) setClient(client *Client) {
+	l.client = client
+}
+
+func (l *LiveRecording) Cancel() error {
+	return l.client.Delete(fmt.Sprintf("/recordings/live/%s", l.Name), nil)
+}
+
+func (l *LiveRecording) Stop() error {
+	return l.client.Post(fmt.Sprintf("/recordings/live/%s/stop", l.Name), nil, nil)
+}
+
+func (l *LiveRecording) Pause() error {
+	return l.client.Post(fmt.Sprintf("/recordings/live/%s/pause", l.Name), nil, nil)
+}
+
+func (l *LiveRecording) Unpause() error {
+	return l.client.Delete(fmt.Sprintf("/recordings/live/%s/pause", l.Name), nil)
+}
+
+func (l *LiveRecording) Mute() error {
+	return l.client.Post(fmt.Sprintf("/recordings/live/%s/mute", l.Name), nil, nil)
+}
+
+func (l *LiveRecording) Unmute() error {
+	return l.client.Delete(fmt.Sprintf("/recordings/live/%s/mute", l.Name), nil)
+}
+
+
+***rest.go file***
+
+package ari
+
+import (
+	"fmt"
+	"net/url"
+
+	"github.com/jmcvetta/napping"
+)
+
+//
+// napping Post/Get/Delete wrappers
+//
+
+// Post does POST request
+func (c *Client) Post(path string, payload, results interface{}) error {
+	_, err := c.PostWithResponse(path, payload, results)
+	return err
+}
+
+// PostWithResponse does POST request and returns the response
+func (c *Client) PostWithResponse(path string, payload, results interface{}) (*napping.Response, error) {
+	url := c.makeURL(path)
+	var errMsg errorResponse
+	c.Log("Sending POST request to %s", url)
+	res, err := c.session.Post(url, payload, results, &errMsg)
+	if results != nil {
+		c.setClientRecurse(results)
+	}
+	return res, c.checkNappingError(res, err, errMsg)
+}
+
+// Get does GET request
+func (c *Client) Get(path string, p *url.Values, results interface{}) error {
+	url := c.makeURL(path)
+	var errMsg errorResponse
+	c.Log("Sending GET request to %s", url)
+	res, err := c.session.Get(url, p, results, &errMsg)
+	if results != nil {
+		c.setClientRecurse(results)
+	}
+	return c.checkNappingError(res, err, errMsg)
+}
+
+// Delete does DELETE request
+func (c *Client) Delete(path string, results interface{}) error {
+	url := c.makeURL(path)
+	var errMsg errorResponse
+	c.Log("Sending DELETE request to %s", url)
+	res, err := c.session.Delete(url, nil, results, &errMsg)
+	if results != nil {
+		c.setClientRecurse(results)
+	}
+	return c.checkNappingError(res, err, errMsg)
+}
+
+type errorResponse struct {
+	Message string
+}
+
+func (c *Client) makeURL(path string) string {
+	return fmt.Sprintf("%s/ari%s", c.endpoint, path)
+}
+
+func (c *Client) checkNappingError(res *napping.Response, err error, errMsg errorResponse) error {
+	if err != nil {
+		return err
+	}
+	status := res.Status()
+	if status > 299 {
+		err := fmt.Errorf("Non-2XX returned by server (%s)", res.HttpResponse().Status)
+		if errMsg.Message != "" {
+			err = fmt.Errorf("%s: %s", err.Error(), errMsg.Message)
+		}
+		c.Log(fmt.Sprintf(" - %s", err.Error()))
+		return err
+	}
+	c.Log(" - Success")
+	return err
+}
+
+
+***sounds.go file***
+
+package ari
+
+import (
+	"fmt"
+
+	"github.com/jmcvetta/napping"
+)
+
+type SoundService struct {
+	client *Client
+}
+
+// SoundsGet retrieves sounds. Both `lang` and `format` can be empty strings.
+func (s *SoundService) List(lang, format string) ([]*Sound, error) {
+	var out []*Sound
+	p := napping.Params{}
+	if lang != "" {
+		p["lang"] = lang
+	}
+	if format != "" {
+		p["format"] = format
+	}
+
+	params := p.AsUrlValues()
+	return out, s.client.Get("/sounds", &params, &out)
+}
+
+func (s *SoundService) Get(soundID string) (*Sound, error) {
+	var out Sound
+	return &out, s.client.Get(fmt.Sprintf("/sounds/%s", soundID), nil, &out)
+}
+
+
+
+***time.go file***
+
+package ari
+
+import (
+	"fmt"
+	"strings"
+	"time"
+)
+
+const timeFormat = "2006-01-02T15:04:05.999-0700"
+
+// Time is a type alias for time.Time with custom marshaling
+type Time time.Time
+
+// UnmarshalJSON unmarshals the JSON input
+func (j *Time) UnmarshalJSON(input []byte) error {
+	// ARI stamps in this format: "2014-10-30T06:04:39.113+0000"
+	strInput := string(input)
+	strInput = strings.Trim(strInput, `"`)
+	newTime, err := time.Parse(timeFormat, strInput)
+	if err != nil {
+		//fmt.Printf(" - ERROR PARSING ARITIME: %s - ", err)
+		return fmt.Errorf("Error parsing Time: %s", err)
+	}
+	*j = Time(newTime)
+	return nil
+}
+
+// FIXME: This doesn't work to improve "pretty.Formatter"
+func (j *Time) MarshalText() ([]byte, error) {
+	t := time.Time(*j)
+	return []byte(t.Format(timeFormat)), nil
+}
+
+
+
