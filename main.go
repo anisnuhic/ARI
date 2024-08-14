@@ -29,51 +29,52 @@ func main() {
 		}
 	}()
 
-	fmt.Println("Unesite komande (dial <from> <to>, list, join <bridge_id>):")
-	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Println("Enter commands: (dial <from> <to>, list, join <channel_id> <extension1> <extension2> ...):")
+    scanner := bufio.NewScanner(os.Stdin)
 
-	for {
-		// Čekamo korisnički unos
-		scanner.Scan()
-		input := scanner.Text()
+    for {
+        // Čekamo korisnički unos
+        scanner.Scan()
+        input := scanner.Text()
 
-		// Parsiramo unos
-		parts := strings.Fields(input)
-		if len(parts) == 0 {
-			continue
-		}
+        // Parsiramo unos
+        parts := strings.Fields(input)
+        if len(parts) == 0 {
+            continue
+        }
 
-		switch parts[0] {
-		case "dial":
-			if len(parts) != 3 {
-				fmt.Println("Neispravan unos za dial. Koristite: dial <from> <to>")
-				continue
-			}
-			from := parts[1]
-			to := parts[2]
-			err := Dial(client, from, to)
-			if err != nil {
-				fmt.Println("Greška pri pokretanju poziva:", err)
-			}
-		case "list":
-			err := List(client)
-			if err != nil {
-				fmt.Println("Greška pri listanju poziva:", err)
-			}
-		case "join":
-			if len(parts) != 2 {
-				fmt.Println("Neispravan unos za join. Koristite: join <bridge_id>")
-				continue
-			}
-			bridgeID := parts[1]
-			err := Join(client, bridgeID)
-			if err != nil {
-				fmt.Println("Greška pri pridruživanju pozivu:", err)
-			}
-		default:
-			fmt.Println("Nepoznata komanda. Koristite: dial <from> <to>, list, join <bridge_id>")
-		}
-	}
+        switch parts[0] {
+        case "dial":
+            if len(parts) != 3 {
+                fmt.Println("Incorrect input for dial. Use: dial <from> <to>")
+                continue
+            }
+            from := parts[1]
+            to := parts[2]
+            err := Dial(client, from, to)
+            if err != nil {
+                fmt.Println("Error starting call:", err)
+            }
+        case "list":
+            err := List(client)
+            if err != nil {
+                fmt.Println("Error listing calls: ", err)
+            }
+        case "join":
+            if len(parts) < 3 {
+                fmt.Println("Incorrect input for join. Use: join <channel_id> <extension1> <extension2> ...")
+                continue
+            }
+            channelID := parts[1]
+            extensions := parts[2:]
+            err := Join(client, channelID, extensions)
+            if err != nil {
+                fmt.Println("Error joining call:", err)
+            }
+        default:
+            fmt.Println("Unknown command. Use: dial <from> <to>, list, join <channel_id> <extension1> <extension2> ...")
+        }
+    }
 }
 
 // Dial pokreće novi poziv između dve ekstenzije
@@ -113,7 +114,6 @@ func Dial(client *ari.Client, from, to string) error {
 }
 
 // List prikazuje trenutne pozive
-// List prikazuje trenutne pozive
 func List(client *ari.Client) error {
 	// Dohvatimo sve kanale
 	channels, err := client.Channels.List()
@@ -123,16 +123,52 @@ func List(client *ari.Client) error {
 
 	fmt.Println("Lista trenutnih poziva:")
 	for _, channel := range channels {
-		fmt.Printf("Kanal ID: %s, Endpoint: %s, Status: %s\n", channel.ID, channel.Connected, channel.State)
+		fmt.Printf("Kanal ID: %s, Endpoint: %s, Status: %s\n", channel.ID, channel.Caller, channel.State)
 	}
 
 	return nil
 }
 
+// Join kreira most (konferenciju) i pridružuje kanale
+func Join(client *ari.Client, channelID string, extensions []string) error {
+    // Kreiraj novi most (konferenciju)
+    createParams := ari.CreateBridgeParams{
+        Type: "mixed", // Tip mosta za konferenciju
+        Name: "Conference_" + channelID, // Naziv mosta
+    }
+    bridge, err := client.Bridges.Create(createParams)
+    if err != nil {
+        return fmt.Errorf("neuspješno kreiranje mosta: %v", err)
+    }
 
-// Join pridružuje korisnika mostu poziva
-func Join(client *ari.Client, bridgeID string) error {
-	// Ovdje bi koristili Bridges service za pridruživanje pozivu
-	fmt.Println("Pridruživanje mostu:", bridgeID)
-	return nil
+    // Dodaj početni kanal u most
+    err = bridge.AddChannel(channelID, ari.Participant)
+    if err != nil {
+        return fmt.Errorf("neuspješno dodavanje početnog kanala %s u most %s: %v", channelID, bridge.ID, err)
+    }
+
+    // Dodaj sve ekstenzije kao kanale u most
+    for _, ext := range extensions {
+        params := ari.OriginateParams{
+            Endpoint:  "PJSIP/" + ext,
+            Context:   "sets",
+            Priority:  1,
+            CallerID:  ext,
+            Timeout:   30,
+        }
+        // Kreiraj kanal za svaku ekstenziju
+        channel, err := client.Channels.Create(params)
+        if err != nil {
+            return fmt.Errorf("neuspješno kreiranje kanala za ekstenziju %s: %v", ext, err)
+        }
+
+        // Dodaj kanal u most
+        err = bridge.AddChannel(channel.ID, ari.Participant)
+        if err != nil {
+            return fmt.Errorf("neuspješno dodavanje kanala %s u most %s: %v", channel.ID, bridge.ID, err)
+        }
+    }
+
+    fmt.Printf("Konferencija kreirana sa mostom %s i pridruženi kanali: %s\n", bridge.ID, append([]string{channelID}, extensions...))
+    return nil
 }
