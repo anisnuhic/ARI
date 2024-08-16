@@ -40,14 +40,14 @@ Let's break down the code line by line
 ```
 	go func() {
 		for event := range eventsChannel {
-			fmt.Printf("Primljen dogadjaj: %v\n", event)
+			fmt.Printf("Event received: %v\n", event)
 		}
 	}()
 ```
 
 - `go func() {...}` : Launches a new goroutine to handle incoming events asynchronously.
 - `for event := range eventsChannel` : Loops over events received on the `eventsChannel.` 
-- `fmt.Printf("Primljen dogadjaj: %v\n", event)` : Prints each received event.
+- `fmt.Printf("Event received: %v\n", event)` : Prints each received event.
 
 ```
 	fmt.Println("Enter commands: (dial <from> <to>, list, join <bridge_id> ):")
@@ -115,21 +115,23 @@ Let's break down the code line by line
 
 ```
 	case "join" :
-		if len(parts) != 2{
+		if len(parts) < 3{
 			fmt.Println("Incorrect input for join. Use: join <bridge_id>)
 			continue
 		}
-		bridgeID := parts[1]
-		err := Join(client, bridgeID)
+		channelID := parts[1]
+		extensions := parts[2:]
+		err := Join(client, channelID, extenisions)
 		if err != nil {
-			fmt.Println("Greska pri pridruzivanju pozivu: ", err)
+			fmt.Println("Error joining call: ", err)
 		}
 ```
 
 - `case "join": ` : Handles the `join` command.
-	- `if len(parts) != 2` : Validates the input length.
-	- `bridgeID := parts[1]` : Retrieves the bridge ID.
-	- `err := Join(client, bridgeID)` : Calls the `Join` function to join a call bridge.
+	- `if len(parts) < 3` : Ensures the `join` command has at least two arguments(`channel_id` and one or more extensions).
+	- `channelID := parts[1]` : Extracts the `channel_id` from the input.
+	- `extensions := parts[2:]` : Extracts the list of extensions to join into conference.
+	- `err := Join(client, channelID, extensions)` : Calls the `Join` function to join a call bridge, creating a conference and add the specified extensions.
 	- `if err != nil {...}` : Prints an error message if joining fails.
 
 ```
@@ -175,13 +177,13 @@ Let's break down the code line by line
 ```
 	_, err := client.Channels.Create(paramsFrom)
 	if err != nil {
-		return fmt.Errorf("neuspjesno pokretanje poziva sa ekstenzije %s ka %s:          %v", from, to, err)
+		return fmt.Errorf("failed to start call from  %s to %s: %v", from, to,           err)
 		}
 	_, err = client.Channels.Create(paramsTo)
 	if err != nil{
-		return fmt.Errorf("neuspjesno pokretanje poziva sa ekstenzije %s ka %s:          %v", to, from, err)
+		return fmt.Errorf("failed to start call from %s to %s: %v", to, from,            err)
 		}
-	fmt.Printf("poziv pokrenut izmedju ekstenzija: %s i %s\n", from, to)
+	fmt.Printf("Call started between extensions: %s and %s\n", from, to)
 	return nil
 	}
 ```
@@ -195,12 +197,12 @@ Let's break down the code line by line
 	func List(client *ari.Client) error {
 		channels, err := client.Channels.List()
 		if err != nil {
-			return fmt.Errorf("neuspjesno listanje kanala: %v", err)
+			return fmt.Errorf("failed to list channels: %v", err)
 		}
 
 		fmt.Println("Lista trenutnih poziva:")
 		for_, channel := range channels {
-			fmt.Printf("Kanal ID %s, Endpoint: %s, Status: %s\n", channel.ID,                channel.Connected, channel.State)
+			fmt.Printf("Channel ID %s, Endpoint: %s, Status: %s\n", channel.ID,              channel.Connected, channel.State)
 		}
 		return nil
 	}
@@ -241,7 +243,7 @@ Let's break down the code line by line
 
 ```
 	if err != nil {
-		return fmt.Errorf("Neuspjesno kreiranje mosta: %v", err)
+		return fmt.Errorf("failed to create bridge: %v", err)
 	}
 ```
 
@@ -257,7 +259,7 @@ Let's break down the code line by line
 
 ```
 	if err != nil{
-		return fmt.Errorf("Neuspjesno dodavanje pocetnog kanala %s u most %s:            %v), channelID, bridge.ID, err)
+		return fmt.Errorf("failed to add initial channel %s to bridge %s:                %v), channelID, bridge.ID, err)
 	}
 ```
 
@@ -291,7 +293,7 @@ Let's break down the code line by line
 ```
 	channel, err := client.Channels.Create(params)
 	if err != nil {
-		return fmt.Errorf("neuspjesno kreiranje kanala za extenziju %s: %v",ext,         err)
+		return fmt.Errorf("failed to create channel for extension %s: %v",ext,           err)
 	}
 ```
 
@@ -302,7 +304,7 @@ Let's break down the code line by line
 ```
 	err = bridge.AddChannel(channel.ID, ari.Participant)
 	if err != nil {
-		return fmt.Errorf("neuspjesno dodavanje kanala %s u most %s: %v",                channel.ID, bridge.ID, err)
+		return fmt.Errorf("failed to add channel %s to bridge %s: %v",                   channel.ID, bridge.ID, err)
 	}
 ```
 
@@ -312,7 +314,7 @@ Let's break down the code line by line
 
 ***Final Output***
 ```
-	fmt.Printf("Konferencija kreirana sa mostom %s i pridruzeni kanali: %s\n",       bridge.ID, append([]string{channelID}, extensions...))
+	fmt.Printf("Conference created with bridge %s and joined channels: %s\n",        bridge.ID, append([]string{channelID}, extensions...))
 ```
 
 - `fmt.Printf(...)` : This prints a message indicating that the conference (bridge) was successfully created and lists all the channels (including the initial channel and the extensions) that were added it.

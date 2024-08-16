@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	//"flag"
 	"fmt"
 	"os"
 	"strings"
