@@ -24,7 +24,7 @@ func main() {
 	// Pratimo događaje iz kanala u zasebnoj gorutini
 	go func() {
 		for event := range eventsChannel {
-			fmt.Printf("Primljen događaj: %v\n", event)
+			fmt.Printf("Event received: %v\n", event)
 		}
 	}()
 
