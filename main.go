@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
-
 	"github.com/abourget/ari"
 )
 
@@ -73,102 +73,87 @@ func main() {
 	}
 }
 
+//dial function for more than 2 extensions
 func Dial(client *ari.Client, extensions []string) error {
+	if len(extensions) == 2 {
+		// Poziv između dve ekstenzije
+		return DirectCall(client, extensions[0], extensions[1])
+	}
 
+	// Kreiramo novi bridge
 	createParams := ari.CreateBridgeParams{
 		Type: "mixing",
 		Name: "Conference_" + strings.Join(extensions, "_"),
 	}
 	bridge, err := client.Bridges.Create(createParams)
 	if err != nil {
-		return fmt.Errorf("neuspješno kreiranje mosta: %v", err)
+		return fmt.Errorf("failed to create bridge: %v ", err)
 	}
+
+	// Map za čuvanje kanala i njihove stanje
+	channels := make(map[string]*ari.Channel)
+
+	// Gorutine za pravljenje kanala i praćenje njihovih statusa
+	var wg sync.WaitGroup
 
 	for _, ext := range extensions {
-		params := ari.OriginateParams{
-			Endpoint:  "PJSIP/" + ext,
-			Extension: ext,
-			Context:   "sets",
-			Priority:  1,
-			CallerID:  ext,
-			Timeout:   30,
-			App:       "my_app",
-			AppArgs:   "dial",
-		}
+		wg.Add(1)
+		go func(ext string) {
+			defer wg.Done()
 
-		channel, err := client.Channels.Create(params)
-		if err != nil {
-			return fmt.Errorf("neuspješno kreiranje kanala za ekstenziju %s: %v", ext, err)
-		}
-		time.Sleep(2 * time.Second)
-		err = bridge.AddChannel(channel.ID, ari.Participant)
-		if err != nil {
-			return fmt.Errorf("neuspješno dodavanje kanala %s u most %s: %v", channel.ID, bridge.ID, err)
-		}
+			params := ari.OriginateParams{
+				Endpoint:  "PJSIP/" + ext,
+				Extension: "s",
+				Context:   "sets",
+				Priority:  1,
+				CallerID:  ext,
+				Timeout:   30,
+				App:       "my_app",
+				AppArgs:   "dial",
+			}
 
-		time.Sleep(2 * time.Second)
+			// Kreiramo kanal
+			channel, err := client.Channels.Create(params)
+			if err != nil {
+				fmt.Printf("failed to create chennel for extension %s: %v\n", ext, err)
+				return
+			}
+
+			// Čuvamo kanal u mapu
+			channels[channel.ID] = channel
+
+			// Pratimo status kanala
+			for {
+				channel, err = client.Channels.Get(channel.ID)
+				if err != nil {
+					fmt.Printf("error getting channel %s: %s\n", channel.ID, err)
+					return
+				}
+
+				if channel.State == "Up" {
+					break
+				}
+
+				time.Sleep(time.Millisecond * 100)
+			}
+
+			// Dodajemo kanal u most
+			err = bridge.AddChannel(channel.ID, ari.Participant)
+			if err != nil {
+				fmt.Printf("failed to add channel %s to bridge %s: %v\n", channel.ID, bridge.ID, err)
+				return
+			}
+		}(ext)
 	}
 
-	fmt.Printf("Konferencijski poziv kreiran za ekstenzije: %v\n", extensions)
+	// Čekamo da sve gorutine završe
+	wg.Wait()
+
+	fmt.Printf("Conference call created for extensions: %v\n", extensions)
 	return nil
 }
 
-func List(client *ari.Client) error {
-
-	channels, err := client.Channels.List()
-	if err != nil {
-		return fmt.Errorf("neuspješno prikazivanje kanala: %v", err)
-	}
-
-	fmt.Println("Lista trenutnih poziva:")
-	for _, channel := range channels {
-		fmt.Printf("Kanal ID: %s, Endpoint: %s, Status: %s\n", channel.ID, channel.Caller, channel.State)
-	}
-
-	return nil
-}
-
-func Join(client *ari.Client, channelID string, extensions []string) error {
-
-	createParams := ari.CreateBridgeParams{
-		Type: "mixed",
-		Name: "Conference_" + channelID,
-	}
-	bridge, err := client.Bridges.Create(createParams)
-	if err != nil {
-		return fmt.Errorf("neuspješno kreiranje mosta: %v", err)
-	}
-
-	err = bridge.AddChannel(channelID, ari.Participant)
-	if err != nil {
-		return fmt.Errorf("neuspješno dodavanje početnog kanala %s u most %s: %v", channelID, bridge.ID, err)
-	}
-
-	for _, ext := range extensions {
-		params := ari.OriginateParams{
-			Endpoint: "PJSIP/" + ext,
-			Context:  "sets",
-			Priority: 1,
-			CallerID: ext,
-			Timeout:  30,
-		}
-
-		channel, err := client.Channels.Create(params)
-		if err != nil {
-			return fmt.Errorf("neuspješno kreiranje kanala za ekstenziju %s: %v", ext, err)
-		}
-
-		err = bridge.AddChannel(channel.ID, ari.Participant)
-		if err != nil {
-			return fmt.Errorf("neuspješno dodavanje kanala %s u most %s: %v", channel.ID, bridge.ID, err)
-		}
-	}
-
-	fmt.Printf("Konferencija kreirana sa mostom %s i pridruženi kanali: %s\n", bridge.ID, append([]string{channelID}, extensions...))
-	return nil
-}
-
-// funkcija za dvije extenzije
+//dial function for two extensions
 func DirectCall(client *ari.Client, ext1, ext2 string) error {
 	params1 := ari.OriginateParams{
 		Endpoint:  "PJSIP/" + ext1,
@@ -192,15 +177,14 @@ func DirectCall(client *ari.Client, ext1, ext2 string) error {
 
 	channel1, err := client.Channels.Create(params1)
 	if err != nil {
-		return fmt.Errorf("neuspješno kreiranje kanala %s: %v", channel1, err)
+		return fmt.Errorf("failed to create channel %s: %v", channel1, err)
 	}
 
 	channel2, err := client.Channels.Create(params2)
 	if err != nil {
-		return fmt.Errorf("neuspješno kreiranje kanala  %s: %v", channel2, err)
+		return fmt.Errorf("failed to create channel  %s: %v", channel2, err)
 	}
 
-	
 	_, err = client.Channels.Create(ari.OriginateParams{
 		Endpoint:  "PJSIP/" + ext2,
 		Extension: ext1,
@@ -212,11 +196,59 @@ func DirectCall(client *ari.Client, ext1, ext2 string) error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("neuspješno uspostavljanje poziva između ekstenzija %s i %s: %v", ext1, ext2, err)
+		return fmt.Errorf("call between extensions %s and %s was unsuccessfully established: %v", ext1, ext2, err)
 	}
 
-	fmt.Printf("Poziv između ekstenzija %s i %s je uspešno uspostavljen.\n", ext1, ext2)
+	fmt.Printf("Call between extensions %s and %s was successfully established.\n", ext1, ext2)
 	return nil
 }
 
+//List function
+func List(client *ari.Client) error {
+	bridges, err := client.Bridges.List()
+	if err != nil {
+		return fmt.Errorf("failed to list bridges: %v", err)
+	}
+
+	fmt.Println("list of current bridges:")
+	for _, bridge := range bridges {
+		fmt.Printf("Bridge ID: %s", bridge.ID)
+	}
+
+	return nil
+}
+
+//Join function
+func Join(client *ari.Client, channelID string, extensions []string) error {
+	// Pokušaj da dobiješ most po ID-u
+	bridge, err := client.Bridges.Get(channelID)
+	if err != nil {
+		return fmt.Errorf("failed to get a bridge: %v", err)
+	}
+
+	for _, ext := range extensions {
+		params := ari.OriginateParams{
+			Endpoint:  "PJSIP/" + ext,
+			Extension: ext,
+			Context:   "sets",
+			Priority:  1,
+			CallerID:  ext,
+			Timeout:   30,
+			App:       "my_app",
+		}
+
+		channel, err := client.Channels.Create(params)
+		if err != nil {
+			return fmt.Errorf("failed to create channel for extension %s: %v", ext, err)
+		}
+
+		err = bridge.AddChannel(channel.ID, ari.Participant)
+		if err != nil {
+			return fmt.Errorf("failed to add channel %s to bridge %s: %v", channel.ID, bridge.ID, err)
+		}
+	}
+
+	fmt.Printf("Extesnion %s was successfully added to bridge %s\n", extensions, bridge.ID)
+	return nil
+}
 

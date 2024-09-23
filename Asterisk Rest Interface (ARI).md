@@ -147,70 +147,133 @@ Let's break down the code line by line
 
 ***Dial Function***
 ```
-	func Dial(client *ari.Client, from, to string) error {
-		paramsFrom := ari.OriginateParams {
-			Endpoint: "PJSIP/" + from,
-			Extension: to,
-			Context: "sets"
-			Priority: 1,
-			CallerID: to,
-			Timeout: 30,
-		}
+	func Dial(client *ari.Client, extensions[] string) error {...}
 ```
 
-- `func Dial(...)` : Defines the `dial` function to start a call between two extensions.
-- `paramsFrom` : Sets parameters for originating a call from `from` to `to`.
+- `func Dial(...)` : Defines the `dial` function to start a call between more than two extensions.
 
 ```
-	paramsTo := ari.OriginateParams {
-		Endpoint: "PJSIP/" + to,
-		Extension: from,
+	if len(extensions) == 2 {
+		return DirectCall(client, extensions[0], extensions[1])
+	}
+```
+
+- This checks if there are only two extensions in the list. If so, it calls `DirectCall` function to create a direct call between the two extensions.
+
+```
+	createParams := ari.CreateBridgeParams{
+		Type: "mixing",
+		Name: "Conference_" + strings.Join(extensions, "_"),
+	}
+	bridge, err := client.Bridges.Create(createParams)
+```
+
+- If there are more than two extensions, it creates a **new conference call** (bridge). A `bridge` in ARI is a mechanism that allows multiple channels to communicate (mixing).
+-  `createParams` is a struct that defines the bridge creation parameters (type: `mixing` and a name fir the bridge).
+
+```
+	channels := make(map[string]*ari.Channel)
+```
+
+- This creates a map to store the channels created for each extension. The key is the channel ID, and the value is the channel itself.
+
+```
+	var wg sync.WaitGroup
+```
+
+- The `sync.WaitGroup` is used to wait for all goroutines to finish. Goroutines are lightweight threads that allow us to run tasks concurrently.
+
+```
+	go func(ext string){
+		deger wg.Done()
+	}(ext)
+```
+
+- For each extension, a goroutine is created that runs the logic for originating a call (creating a channel for the extension).
+
+```
+	params := ari.OriginateParams{ 
+		Endpoint: "PJSIP/" + ext,
+		Extension: "s",
 		Context: "sets",
-		Priority: 1, 
-		CallerID: from,
+		Priority: 1,
+		CallerID: ext,
 		Timeout: 30, 
+		App: "my_app", 
+		AppArgs: "dial", 
+	}
+	channel, err := client.Channels.Create(params)
+```
+
+- A channel is created using the `OriginateParams`, specifying the Endpoint (e.g., "PJSIP/1001"), context, priority, and CallerID for the call.
+- After originating the call, the program continuously checks the state of the channel until it goes Up (i.e., the call is connected).
+
+```
+	err = bridge.AddChannel(channel.ID, ari.Participant)
+```
+
+- Once the channel is ready (state is "Up"), the channel is added to the bridge (conference call).
+
+```
+	wg.Wait()
+```
+
+- This ensures that the function waits for all extensions (channels) to be connected before proceeding.
+
+***DirectCall Function***
+```
+	func DirectCall(client * ari.Client, ext1, ext2 string) error {...}
+```
+
+- This function handles a simple direct call between two extensions.
+
+```
+	params1 := ari.OriginateParams{ 
+		Endpoint: "PJSIP/" + ext1, 
+		Extension: ext1, 
+		Context: "sets", 
+		Priority: 1, 
+		CallerID: ext1, 
+		Timeout: 30, 
+		App: "my_app", 
 	}
 ```
 
-- `paramsTo` : Sets parameters for originating a call from `to` to `from`.
+- A channel is created for each extension using ari.OriginateParams, which specifies the endpoint, context, priority, etc.
 
 ```
-	_, err := client.Channels.Create(paramsFrom)
-	if err != nil {
-		return fmt.Errorf("failed to start call from  %s to %s: %v", from, to,           err)
-		}
-	_, err = client.Channels.Create(paramsTo)
+	channel1, err := client.Channels.Create(params1)
 	if err != nil{
-		return fmt.Errorf("failed to start call from %s to %s: %v", to, from,            err)
-		}
-	fmt.Printf("Call started between extensions: %s and %s\n", from, to)
-	return nil
+		return fmt.Errorf("failed to create channel %s: %v", channel1, err)
 	}
 ```
 
-- `client.Channels.Create(paramsFrom)`, `client.Channels.Create(paramsTo)` : Creates channels (calls) with the specified parameters.
-- `return fmt.Errorf(...)` : Returns an error if the call fails.
-- `fmt.Printf(...)` : Prints a message indicating the the call has been started.
+ - If there is an error in creating the channel, it prints an error message.
 
+```
+	fmt.Printf("Call between extensions %s and %s was successfully established.      \n", ext1, ext2")
+```
+
+- Once both channels are created, the call is established between the two extensions.
 ***List function***
 ```
 	func List(client *ari.Client) error {
-		channels, err := client.Channels.List()
+		bridges, err := client.Bridges.List()
 		if err != nil {
-			return fmt.Errorf("failed to list channels: %v", err)
+			return fmt.Errorf("failed to list bridges: %v", err)
 		}
 
-		fmt.Println("Lista trenutnih poziva:")
-		for_, channel := range channels {
-			fmt.Printf("Channel ID %s, Endpoint: %s, Status: %s\n", channel.ID,              channel.Connected, channel.State)
+		fmt.Println("list of current bridges:")
+		for _, bridge := range bridges {
+			fmt.Printf("Bridge ID %s", bridge.ID )
 		}
 		return nil
 	}
 ```
 - `func List (...)` : Defines the `List` function to display current calls.
-- `channels, err := client.Channels.List()` : Retrieves  a list of channels (calls).
+- `channels, err := client.Channels.List()` : Retrieves  a list of all current bridges.
 - `fmt.Errorf(...)` : Returns an error if listing fails.
-- `fmt.Println(...)`, `fmt.Printf(...)` : Prints details of each channel.
+- `for _, bridge := range bridges {...}` : It prints out the ID of each bridge found.
 
 ***Join function***
 
@@ -218,112 +281,34 @@ Let's break down the code line by line
 	func Join (client *ari.Client, channelID string, extensions []string) error{
 ```
 
-- `func Join` : This defines a new function named `Join`
-- `client *ari.Client` : The function takes an `ari.Client` pointer as an argument. This is the ARI client used to interact with the Asterisk REST Interface.
-- `channelID string` : This is a string argument representing the ID of the channel you want to add to the conference.
-- `extensions []string` : This is a slice of strings representing the extensions you want to add to the conference.
-- `error` : The function returns an error if anything goes wrong.
-
-***Creating the Bridge (Conference)
-```
-	createParams := ari.CreateBridgeParams{
-	Type: "mixed",
-	Name: "Conference_"	+ ChannelID,
-```
-
-- `createParams := ari.CreateBridgeParams{}` : This creates an instance of `ari.CreateBridgeParams`, which is used to specify parameters for creating new bridge (conference). 
-- `Type: "mixed"`: The bridge type is set to `"mixed"`, which means it's a conference where multiple participants can speak and hear each other.
-- `Name: "Conference_" + channelID` : The name of the bridge is set to `"Conference_"` followed by the `channelID`. This gives the bridge a unique name based on the initial channel.
+- This function allows existing channels to join an existing bridge.
 
 ```
-	bridge, err := client.Bridges.Create(createParams)
+	bridge, err := client.Bridge.Get(channelID)
 ```
 
-- `bridge, err := client.Bridges.Create(createParams)` : This line creates the bridge using the ARI client's `Bridge.Create` method with the parameters defined above. It returns the created bridge object and any error that occurs during creation.
+- It retrieves the bridge using the provided `channelID`.
 
 ```
-	if err != nil {
-		return fmt.Errorf("failed to create bridge: %v", err)
-	}
-```
-
-- `if err != nil` : This checks if there was an error in creating the bridge.
-- `return fmt.Errorf(...)`: If an error occurred, the function returns a formatted error message indicating the failure to create the bridge.
-
-***Adding the Initial Channel to the Bridge***
-```
-	err = bridge.AddChannel(channelID, ari.Participant)
-```
-
- - `err - bridge.AddChannel(channelID, ari.Participant)`: This line adds the initial channel (identified by `channelID`) to the bridge. The channel is added with the role `Participant` , which means it can speak and hear others.
-
-```
-	if err != nil{
-		return fmt.Errorf("failed to add initial channel %s to bridge %s:                %v), channelID, bridge.ID, err)
-	}
-```
-
-- `if err != nil` : This checks if there was an error in adding the initial channel to the bridge.
-- `return fmt.Errorf(...)` : IF an error occurred, the function returns a formatted error message indicating the failure to add the channel to the bridge.
-
-***Adding Extensions as Channels to the Bridge***
-```
-	for _, ext := range extensions {
-```
-
-- `for _, ext := range extensions`: This starts a loop that iterates over extension in the `extensions` slice.
-
-```
-	params := ari.OriginateParams{
-		Endpoint: "PJSIP/" + ext ,
-		Context: "sets",
-		Priority: 1,
-		CallerID: ext,
-		Timeout: 30,
-	}
-```
-
-- `params := ari.OriginateParams{}` : For each extension, an `OriginateParams` object is created. This defines the parameters for creating a new channel to connect extension to the conference.
-- `Endpoint: "PJSIP/" + ext` : The `Endpoint` is set to `"PJSIP/` followed by the extension. This specifies the SIP endpoint to call.
-- `Context: "sets"` : The `Context` in the Asterisk dial plan where the call should be routed.
-- `Priority: 1` : The priority of the call in the dial plan.
-- `CallerID: ext` : The caller ID for the new channel is set to the extension itself.
-- `Timeout: 30` : The call will time out of it is not answered within 30 seconds.
-
-```
+	params := ari.OriginateParams{ 
+		Endpoint: "PJSIP/" + ext, 
+		Extension: ext, 
+		Context: "sets", 
+		Priority: 1, 
+		CallerID: ext, 
+		Timeout: 30, 
+		App: "my_app", 
+	} 
 	channel, err := client.Channels.Create(params)
-	if err != nil {
-		return fmt.Errorf("failed to create channel for extension %s: %v",ext,           err)
-	}
 ```
 
-- `channel, err := client.Channels.Create(params)` : This line creates a new channel for the extension using the `Create` method of the `Channels` service.
-- `if err != nil` : This checks if there was an error in creating the channel.
-- `return fmt.Errorf(...)` : If an error occurred, the function returns a formatted error message indicating the failure to create the channel for the extension.
+- For each extension, it creates a new channel using `OriginateParams`, similar to the `Dial` function.
 
 ```
 	err = bridge.AddChannel(channel.ID, ari.Participant)
-	if err != nil {
-		return fmt.Errorf("failed to add channel %s to bridge %s: %v",                   channel.ID, bridge.ID, err)
-	}
 ```
 
-- `err = bridge.AddChannel(channel.ID, ari.Participant)` : This line adds the newly created channel to the bridge as a participant.
-- `if err != nil` : This checks if there was an error in adding the channel to the bridge.
-- `return fmt.Errorf(...)` : If an error occurred, the function returns a formatted error message indicating the failure to add the channel to the bridge.
-
-***Final Output***
-```
-	fmt.Printf("Conference created with bridge %s and joined channels: %s\n",        bridge.ID, append([]string{channelID}, extensions...))
-```
-
-- `fmt.Printf(...)` : This prints a message indicating that the conference (bridge) was successfully created and lists all the channels (including the initial channel and the extensions) that were added it.
-
-```
-	return nil
-```
-
-- `return nil` : If everything was successful, the function returns `nil` indicating no error occurred.
+- The created channel is add to the existing bridge, turning the current call into a conference
 
 
 
