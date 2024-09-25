@@ -18,6 +18,18 @@
                 "source": false
               }
             }
+          },
+          {
+            "id": "2a02aca473c2c521",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Asterisk Rest Interface (ARI).md",
+                "mode": "source",
+                "source": false
+              }
+            }
           }
         ]
       }
@@ -69,8 +81,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300,
-    "collapsed": true
+    "width": 300
   },
   "right": {
     "id": "1cc531a5d692ecb6",
@@ -147,8 +158,10 @@
       "command-palette:Open command palette": false
     }
   },
-  "active": "0f60dd029cbedcb5",
+  "active": "9d6e8a9df3bb3fea",
   "lastOpenFiles": [
+    "ARI (description).md",
+    "Asterisk Rest Interface (ARI).md",
     "Conferencing call.md"
   ]
 }

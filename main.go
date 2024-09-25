@@ -3,11 +3,11 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"github.com/abourget/ari"
 	"os"
 	"strings"
 	"sync"
 	"time"
-	"github.com/abourget/ari"
 )
 
 func main() {
@@ -18,7 +18,6 @@ func main() {
 	port := 8088
 	appName := "my_app"
 	client := ari.NewClient(username, password, hostname, port, appName)
-
 	eventsChannel := client.LaunchListener()
 
 	go func() {
@@ -26,7 +25,19 @@ func main() {
 			fmt.Printf("Event received: %v\n", event)
 		}
 	}()
-
+	
+	go func(){
+	bridges, err := client.Bridges.List()
+	if err != nil {
+		return
+	}
+	for _, bridge := range bridges {
+		if len(bridge.Channels) == 0 {
+			bridge.Destroy()
+		}
+	}
+	}()
+	
 	fmt.Println("Enter commands: (dial <extension1> <extension2> ... for conference, list, join <channel_id> <extension1> <extension2> ...):")
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -67,13 +78,15 @@ func main() {
 			if err != nil {
 				fmt.Println("Error joining call:", err)
 			}
+		case "exit":
+			return 
 		default:
 			fmt.Println("Unknown command. Use: dial <extension1> <extension2> ..., list, join <channel_id> <extension1> <extension2> ...")
 		}
 	}
 }
 
-//dial function for more than 2 extensions
+// dial function for more than 2 extensions
 func Dial(client *ari.Client, extensions []string) error {
 	if len(extensions) == 2 {
 		// Poziv između dve ekstenzije
@@ -103,7 +116,7 @@ func Dial(client *ari.Client, extensions []string) error {
 
 			params := ari.OriginateParams{
 				Endpoint:  "PJSIP/" + ext,
-				Extension: "s",
+				Extension: ext,
 				Context:   "sets",
 				Priority:  1,
 				CallerID:  ext,
@@ -153,7 +166,7 @@ func Dial(client *ari.Client, extensions []string) error {
 	return nil
 }
 
-//dial function for two extensions
+// dial function for two extensions
 func DirectCall(client *ari.Client, ext1, ext2 string) error {
 	params1 := ari.OriginateParams{
 		Endpoint:  "PJSIP/" + ext1,
@@ -203,7 +216,7 @@ func DirectCall(client *ari.Client, ext1, ext2 string) error {
 	return nil
 }
 
-//List function
+// List function
 func List(client *ari.Client) error {
 	bridges, err := client.Bridges.List()
 	if err != nil {
@@ -212,13 +225,17 @@ func List(client *ari.Client) error {
 
 	fmt.Println("list of current bridges:")
 	for _, bridge := range bridges {
+		if len(bridge.Channels) == 0 {
+			bridge.Destroy()
+		} else {
 		fmt.Printf("Bridge ID: %s", bridge.ID)
+		}
 	}
 
 	return nil
 }
 
-//Join function
+// Join function
 func Join(client *ari.Client, channelID string, extensions []string) error {
 	// Pokušaj da dobiješ most po ID-u
 	bridge, err := client.Bridges.Get(channelID)
@@ -251,4 +268,3 @@ func Join(client *ari.Client, channelID string, extensions []string) error {
 	fmt.Printf("Extesnion %s was successfully added to bridge %s\n", extensions, bridge.ID)
 	return nil
 }
-
