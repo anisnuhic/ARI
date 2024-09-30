@@ -103,7 +103,7 @@ func Dial(client *ari.Client, extensions []string) error {
 		return fmt.Errorf("failed to create bridge: %v ", err)
 	}
 
-	// Map za čuvanje kanala i njihove stanje
+	// Map za čuvanje kanala i njihovih stanja
 	channels := make(map[string]*ari.Channel)
 
 	// Gorutine za pravljenje kanala i praćenje njihovih statusa
