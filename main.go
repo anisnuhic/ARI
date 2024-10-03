@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 func main() {
@@ -20,24 +21,30 @@ func main() {
 	client := ari.NewClient(username, password, hostname, port, appName)
 	eventsChannel := client.LaunchListener()
 
+	mapa := make(map[string]int)
+
 	go func() {
 		for event := range eventsChannel {
-			fmt.Printf("Event received: %v\n", event)
+			fmt.Printf("Event received: %v\n", event.GetType())
+			if event.GetType() == "ChannelDestroyed" {
+				bridges, _ := client.Bridges.List()
+				for _, bridge := range bridges {
+					fmt.Println(bridge.Name)
+					fmt.Println(bridge.Channels)
+					if len(bridge.Channels) == 1 && mapa[bridge.ID] == 0 {
+						c1, _ := client.Channels.Get(bridge.Channels[0])
+						c1.Hangup()
+						bridge.Destroy()
+					}
+					if len(bridge.Channels) == 0 {
+						bridge.Destroy()
+					}
+				}
+
+			}
 		}
 	}()
-	
-	go func(){
-	bridges, err := client.Bridges.List()
-	if err != nil {
-		return
-	}
-	for _, bridge := range bridges {
-		if len(bridge.Channels) == 0 {
-			bridge.Destroy()
-		}
-	}
-	}()
-	
+
 	fmt.Println("Enter commands: (dial <extension1> <extension2> ... for conference, list, join <channel_id> <extension1> <extension2> ...):")
 	scanner := bufio.NewScanner(os.Stdin)
 
@@ -58,7 +65,7 @@ func main() {
 				continue
 			}
 			extensions := parts[1:]
-			err := Dial(client, extensions)
+			err := Dial(client, extensions, mapa)
 			if err != nil {
 				fmt.Println("Error starting conference call:", err)
 			}
@@ -74,12 +81,12 @@ func main() {
 			}
 			channelID := parts[1]
 			extensions := parts[2:]
-			err := Join(client, channelID, extensions)
+			err := Join(client, channelID, extensions, mapa)
 			if err != nil {
 				fmt.Println("Error joining call:", err)
 			}
 		case "exit":
-			return 
+			return
 		default:
 			fmt.Println("Unknown command. Use: dial <extension1> <extension2> ..., list, join <channel_id> <extension1> <extension2> ...")
 		}
@@ -87,16 +94,17 @@ func main() {
 }
 
 // dial function for more than 2 extensions
-func Dial(client *ari.Client, extensions []string) error {
+func Dial(client *ari.Client, extensions []string, mapa map[string]int) error {
+	name := "Conference_"
+	flag := 1
 	if len(extensions) == 2 {
-		// Poziv između dve ekstenzije
-		return DirectCall(client, extensions[0], extensions[1])
+		name = "Call_"
+		flag = 0
 	}
-
 	// Kreiramo novi bridge
 	createParams := ari.CreateBridgeParams{
 		Type: "mixing",
-		Name: "Conference_" + strings.Join(extensions, "_"),
+		Name: name,
 	}
 	bridge, err := client.Bridges.Create(createParams)
 	if err != nil {
@@ -163,56 +171,7 @@ func Dial(client *ari.Client, extensions []string) error {
 	wg.Wait()
 
 	fmt.Printf("Conference call created for extensions: %v\n", extensions)
-	return nil
-}
-
-// dial function for two extensions
-func DirectCall(client *ari.Client, ext1, ext2 string) error {
-	params1 := ari.OriginateParams{
-		Endpoint:  "PJSIP/" + ext1,
-		Extension: ext1,
-		Context:   "sets",
-		Priority:  1,
-		CallerID:  ext1,
-		Timeout:   30,
-		App:       "my_app",
-	}
-
-	params2 := ari.OriginateParams{
-		Endpoint:  "PJSIP/" + ext2,
-		Extension: ext2,
-		Context:   "sets",
-		Priority:  1,
-		CallerID:  ext2,
-		Timeout:   30,
-		App:       "my_app",
-	}
-
-	channel1, err := client.Channels.Create(params1)
-	if err != nil {
-		return fmt.Errorf("failed to create channel %s: %v", channel1, err)
-	}
-
-	channel2, err := client.Channels.Create(params2)
-	if err != nil {
-		return fmt.Errorf("failed to create channel  %s: %v", channel2, err)
-	}
-
-	_, err = client.Channels.Create(ari.OriginateParams{
-		Endpoint:  "PJSIP/" + ext2,
-		Extension: ext1,
-		Context:   "sets",
-		Priority:  1,
-		CallerID:  ext2,
-		Timeout:   30,
-		App:       "my_app",
-	})
-
-	if err != nil {
-		return fmt.Errorf("call between extensions %s and %s was unsuccessfully established: %v", ext1, ext2, err)
-	}
-
-	fmt.Printf("Call between extensions %s and %s was successfully established.\n", ext1, ext2)
+	mapa[bridge.ID] = flag
 	return nil
 }
 
@@ -222,49 +181,52 @@ func List(client *ari.Client) error {
 	if err != nil {
 		return fmt.Errorf("failed to list bridges: %v", err)
 	}
-
 	fmt.Println("list of current bridges:")
 	for _, bridge := range bridges {
 		if len(bridge.Channels) == 0 {
 			bridge.Destroy()
 		} else {
-		fmt.Printf("Bridge ID: %s", bridge.ID)
+			fmt.Printf("bridges: %s\n", bridge.ID)
 		}
 	}
-
 	return nil
 }
 
 // Join function
-func Join(client *ari.Client, channelID string, extensions []string) error {
+func Join(client *ari.Client, channelID string, extensions []string, mapa map[string]int) error {
 	// Pokušaj da dobiješ most po ID-u
-	bridge, err := client.Bridges.Get(channelID)
-	if err != nil {
-		return fmt.Errorf("failed to get a bridge: %v", err)
-	}
-
-	for _, ext := range extensions {
-		params := ari.OriginateParams{
-			Endpoint:  "PJSIP/" + ext,
-			Extension: ext,
-			Context:   "sets",
-			Priority:  1,
-			CallerID:  ext,
-			Timeout:   30,
-			App:       "my_app",
-		}
-
-		channel, err := client.Channels.Create(params)
+	if strings.IndexFunc(channelID, unicode.IsLetter) >= 0 {
+		bridge, err := client.Bridges.Get(channelID)
 		if err != nil {
-			return fmt.Errorf("failed to create channel for extension %s: %v", ext, err)
+			return fmt.Errorf("failed to get a bridge: %v", err)
 		}
 
-		err = bridge.AddChannel(channel.ID, ari.Participant)
-		if err != nil {
-			return fmt.Errorf("failed to add channel %s to bridge %s: %v", channel.ID, bridge.ID, err)
+		for _, ext := range extensions {
+			params := ari.OriginateParams{
+				Endpoint:  "PJSIP/" + ext,
+				Extension: ext,
+				Context:   "sets",
+				Priority:  1,
+				CallerID:  ext,
+				Timeout:   30,
+				App:       "my_app",
+			}
+
+			channel, err := client.Channels.Create(params)
+			if err != nil {
+				return fmt.Errorf("failed to create channel for extension %s: %v", ext, err)
+			}
+			if mapa[bridge.ID] == 0 {
+				mapa[bridge.ID] = 1
+			}
+			err = bridge.AddChannel(channel.ID, ari.Participant)
+			if err != nil {
+				return fmt.Errorf("failed to add channel %s to bridge %s: %v", channel.ID, bridge.ID, err)
+			}
+
 		}
+
+		fmt.Printf("Extesnion %s was successfully added to bridge %s\n", extensions, bridge.ID)
 	}
-
-	fmt.Printf("Extesnion %s was successfully added to bridge %s\n", extensions, bridge.ID)
 	return nil
 }

@@ -13,7 +13,7 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Asterisk Rest Interface (ARI).md",
+                "file": "ARI (description).md",
                 "mode": "source",
                 "source": false
               }
@@ -69,7 +69,8 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 300,
+    "collapsed": true
   },
   "right": {
     "id": "1cc531a5d692ecb6",
@@ -85,7 +86,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "Asterisk Rest Interface (ARI).md",
+                "file": "ARI (description).md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -102,7 +103,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "Asterisk Rest Interface (ARI).md",
+                "file": "ARI (description).md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               }
@@ -125,7 +126,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "Asterisk Rest Interface (ARI).md"
+                "file": "ARI (description).md"
               }
             }
           }
@@ -146,10 +147,10 @@
       "command-palette:Open command palette": false
     }
   },
-  "active": "9d6e8a9df3bb3fea",
+  "active": "0f60dd029cbedcb5",
   "lastOpenFiles": [
-    "ARI (description).md",
     "Asterisk Rest Interface (ARI).md",
+    "ARI (description).md",
     "Conferencing call.md"
   ]
 }
