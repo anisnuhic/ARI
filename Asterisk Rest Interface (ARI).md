@@ -8,6 +8,9 @@ Let's break down the code line by line
 		"os"
 		"strings"
 		"github.com/abourget/ari"
+		"sync"
+		"time"
+		"unicode"
 	)
 ```
 
@@ -16,6 +19,9 @@ Let's break down the code line by line
 - `os` : Provides functions for interacting with the operating system (like reading from standard input).
 - `strings` : Provides functions for strings manipulation.
 - `github.com/abourget/ari` : A Go package for interacting with Asterisk Rest Interface (ARI).
+- `sync` : Package for synchronizing goroutines
+- `time` : Package for time-related functions
+- `unicode` : Package for working with unicode characters
 
 ***Main function***
 ```
@@ -26,12 +32,13 @@ Let's break down the code line by line
 		port := 8088
 		appName := "my_app"
 		client := ari.NewClient(username, password, hostname, port, appName)
+		mapa := make(map[string]int)
 	}
 ```
 
 - `username`, `password`, `hostname`, `port`, `appName` : Variables for ARI client connection parameters.
 - `client := ari.NewClient(...)` : Creates a new ARI client instance with the provided credentials  and connection details.
-
+- `mapa := make(map[string]int)` : This is a dictionary used to store bridge states (whether it's a conference call or regular call).
 ```
 	eventsChannel := client.LaunchListener()
 ```
@@ -48,6 +55,7 @@ Let's break down the code line by line
 - `go func() {...}` : Launches a new goroutine to handle incoming events asynchronously.
 - `for event := range eventsChannel` : Loops over events received on the `eventsChannel.` 
 - `fmt.Printf("Event received: %v\n", event)` : Prints each received event.
+- `if eveny.GetType() == "ChannelDestroyed" {...}` : It checks for the `ChannelDestroyed` event, signaling the end of a call. If the bridge is nearly empty (with 0 or 1 channel in the regular call or 0 channel in conference call), it destroys the bridge.
 
 ```
 	fmt.Println("Enter commands: (dial <from> <to>, list, join <bridge_id> ):")
@@ -147,23 +155,31 @@ Let's break down the code line by line
 
 ***Dial Function***
 ```
-	func Dial(client *ari.Client, extensions[] string) error {...}
+	func Dial(client *ari.Client, extensions[] string, mapa map[string]int)           error {...}
 ```
 
 - `func Dial(...)` : Defines the `dial` function to start a call between more than two extensions.
 
 ```
+	name := "Conference_"
+	flag := 1
+```
+
+- Creates two variables which is used to set bridge parameters 
+
+```
 	if len(extensions) == 2 {
-		return DirectCall(client, extensions[0], extensions[1])
+		name = "Call_"
+		flag = 0 
 	}
 ```
 
-- This checks if there are only two extensions in the list. If so, it calls `DirectCall` function to create a direct call between the two extensions.
+- This checks if there are only two extensions in the list. If so, change the values of variables
 
 ```
 	createParams := ari.CreateBridgeParams{
 		Type: "mixing",
-		Name: "Conference_" + strings.Join(extensions, "_"),
+		Name: name + strings.Join(extensions, "_"),
 	}
 	bridge, err := client.Bridges.Create(createParams)
 ```
@@ -216,45 +232,12 @@ Let's break down the code line by line
 
 ```
 	wg.Wait()
+	mapa[bridge.ID] = flag
 ```
 
 - This ensures that the function waits for all extensions (channels) to be connected before proceeding.
+- `mapa[bridge.ID] = flag` : Sets key and value of map
 
-***DirectCall Function***
-```
-	func DirectCall(client * ari.Client, ext1, ext2 string) error {...}
-```
-
-- This function handles a simple direct call between two extensions.
-
-```
-	params1 := ari.OriginateParams{ 
-		Endpoint: "PJSIP/" + ext1, 
-		Extension: ext1, 
-		Context: "sets", 
-		Priority: 1, 
-		CallerID: ext1, 
-		Timeout: 30, 
-		App: "my_app", 
-	}
-```
-
-- A channel is created for each extension using ari.OriginateParams, which specifies the endpoint, context, priority, etc.
-
-```
-	channel1, err := client.Channels.Create(params1)
-	if err != nil{
-		return fmt.Errorf("failed to create channel %s: %v", channel1, err)
-	}
-```
-
- - If there is an error in creating the channel, it prints an error message.
-
-```
-	fmt.Printf("Call between extensions %s and %s was successfully established.      \n", ext1, ext2")
-```
-
-- Once both channels are created, the call is established between the two extensions.
 ***List function***
 ```
 	func List(client *ari.Client) error {
@@ -278,10 +261,16 @@ Let's break down the code line by line
 ***Join function***
 
 ```
-	func Join (client *ari.Client, channelID string, extensions []string) error{
+	func Join (client *ari.Client, channelID string, extensions []string, mapa        map[string]int) error{
 ```
 
 - This function allows existing channels to join an existing bridge.
+
+```
+	if strings.IndexFunc(channelID, unicode.IsLetter) >= 0 {...}
+```
+
+- This checks if one letter exists in the `channelId` string
 
 ```
 	bridge, err := client.Bridge.Get(channelID)
@@ -303,6 +292,14 @@ Let's break down the code line by line
 ```
 
 - For each extension, it creates a new channel using `OriginateParams`, similar to the `Dial` function.
+
+```
+	if mapa[bridge.ID] == 0 {
+		mapa.[bridge.ID] = 1
+	}
+```
+
+- If someone joins the regular call set the flag to 1 and that indicates that becomes conference call
 
 ```
 	err = bridge.AddChannel(channel.ID, ari.Participant)

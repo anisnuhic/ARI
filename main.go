@@ -29,8 +29,6 @@ func main() {
 			if event.GetType() == "ChannelDestroyed" {
 				bridges, _ := client.Bridges.List()
 				for _, bridge := range bridges {
-					fmt.Println(bridge.Name)
-					fmt.Println(bridge.Channels)
 					if len(bridge.Channels) == 1 && mapa[bridge.ID] == 0 {
 						c1, _ := client.Channels.Get(bridge.Channels[0])
 						c1.Hangup()
