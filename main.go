@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	// Kreiramo klijenta
+	//Create client
 	username := "main"
 	password := "pass"
 	hostname := "localhost"
@@ -20,7 +20,6 @@ func main() {
 	appName := "my_app"
 	client := ari.NewClient(username, password, hostname, port, appName)
 	eventsChannel := client.LaunchListener()
-
 	mapa := make(map[string]int)
 
 	go func() {
@@ -34,11 +33,11 @@ func main() {
 						c1.Hangup()
 						bridge.Destroy()
 					}
+
 					if len(bridge.Channels) == 0 {
 						bridge.Destroy()
 					}
 				}
-
 			}
 		}
 	}()
@@ -91,7 +90,7 @@ func main() {
 	}
 }
 
-// dial function for more than 2 extensions
+// dial function
 func Dial(client *ari.Client, extensions []string, mapa map[string]int) error {
 	name := "Conference_"
 	flag := 1
@@ -99,7 +98,7 @@ func Dial(client *ari.Client, extensions []string, mapa map[string]int) error {
 		name = "Call_"
 		flag = 0
 	}
-	// Kreiramo novi bridge
+
 	createParams := ari.CreateBridgeParams{
 		Type: "mixing",
 		Name: name,
@@ -109,10 +108,7 @@ func Dial(client *ari.Client, extensions []string, mapa map[string]int) error {
 		return fmt.Errorf("failed to create bridge: %v ", err)
 	}
 
-	// Map za čuvanje kanala i njihovih stanja
-	channels := make(map[string]*ari.Channel)
-
-	// Gorutine za pravljenje kanala i praćenje njihovih statusa
+	// Goroutines for creating channels and monitoring their status
 	var wg sync.WaitGroup
 
 	for _, ext := range extensions {
@@ -131,24 +127,18 @@ func Dial(client *ari.Client, extensions []string, mapa map[string]int) error {
 				AppArgs:   "dial",
 			}
 
-			// Kreiramo kanal
 			channel, err := client.Channels.Create(params)
 			if err != nil {
 				fmt.Printf("failed to create chennel for extension %s: %v\n", ext, err)
 				return
 			}
 
-			// Čuvamo kanal u mapu
-			channels[channel.ID] = channel
-
-			// Pratimo status kanala
 			for {
 				channel, err = client.Channels.Get(channel.ID)
 				if err != nil {
 					fmt.Printf("error getting channel %s: %s\n", channel.ID, err)
 					return
 				}
-
 				if channel.State == "Up" {
 					break
 				}
@@ -156,20 +146,21 @@ func Dial(client *ari.Client, extensions []string, mapa map[string]int) error {
 				time.Sleep(time.Millisecond * 100)
 			}
 
-			// Dodajemo kanal u most
 			err = bridge.AddChannel(channel.ID, ari.Participant)
 			if err != nil {
 				fmt.Printf("failed to add channel %s to bridge %s: %v\n", channel.ID, bridge.ID, err)
 				return
 			}
+
 		}(ext)
 	}
 
-	// Čekamo da sve gorutine završe
+	// waiting for all the goroutines to finish
 	wg.Wait()
 
 	fmt.Printf("Conference call created for extensions: %v\n", extensions)
 	mapa[bridge.ID] = flag
+
 	return nil
 }
 
@@ -181,18 +172,13 @@ func List(client *ari.Client) error {
 	}
 	fmt.Println("list of current bridges:")
 	for _, bridge := range bridges {
-		if len(bridge.Channels) == 0 {
-			bridge.Destroy()
-		} else {
 			fmt.Printf("bridges: %s\n", bridge.ID)
-		}
 	}
 	return nil
 }
 
 // Join function
 func Join(client *ari.Client, channelID string, extensions []string, mapa map[string]int) error {
-	// Pokušaj da dobiješ most po ID-u
 	if strings.IndexFunc(channelID, unicode.IsLetter) >= 0 {
 		bridge, err := client.Bridges.Get(channelID)
 		if err != nil {
@@ -214,17 +200,17 @@ func Join(client *ari.Client, channelID string, extensions []string, mapa map[st
 			if err != nil {
 				return fmt.Errorf("failed to create channel for extension %s: %v", ext, err)
 			}
+
 			if mapa[bridge.ID] == 0 {
 				mapa[bridge.ID] = 1
 			}
+
 			err = bridge.AddChannel(channel.ID, ari.Participant)
 			if err != nil {
 				return fmt.Errorf("failed to add channel %s to bridge %s: %v", channel.ID, bridge.ID, err)
 			}
-
 		}
-
-		fmt.Printf("Extesnion %s was successfully added to bridge %s\n", extensions, bridge.ID)
+		fmt.Printf("Extension %s was successfully added to bridge %s\n", extensions, bridge.ID)
 	}
 	return nil
 }
