@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 )
 
 func main() {
@@ -179,7 +178,6 @@ func List(client *ari.Client) error {
 
 // Join function
 func Join(client *ari.Client, channelID string, extensions []string, mapa map[string]int) error {
-	if strings.IndexFunc(channelID, unicode.IsLetter) >= 0 {
 		bridge, err := client.Bridges.Get(channelID)
 		if err != nil {
 			return fmt.Errorf("failed to get a bridge: %v", err)
@@ -211,6 +209,6 @@ func Join(client *ari.Client, channelID string, extensions []string, mapa map[st
 			}
 		}
 		fmt.Printf("Extension %s was successfully added to bridge %s\n", extensions, bridge.ID)
-	}
+
 	return nil
 }
